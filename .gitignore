@@ -1,0 +1,22 @@
+# dados de leads e conversas (privados)
+*.sqlite3
+*.sqlite3-journal
+
+# segredos e sessões
+atlas_gmail/
+wa-watcher/.session/
+wa-watcher/.wwebjs_cache/
+token.json
+credentials.json
+.env
+
+# gerados
+node_modules/
+__pycache__/
+*.pyc
+*.log
+server.out
+
+# demonstracao publicada na Vercel (gerada por demo/montar.py)
+demo/captacao-de-leads-demo/
+.vercel/

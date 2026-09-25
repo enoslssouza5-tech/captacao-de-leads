@@ -1,78 +1,56 @@
 <!doctype html>
-<html lang="pt-BR">
+<html lang="pt-BR" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Nexora e Atlas CRM</title>
-<link rel="stylesheet" href="/styles.css">
-<link rel="stylesheet" href="/mail.css">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#08080a">
+<title>Captação de Leads</title>
+<link rel="stylesheet" href="/css/app.css">
 </head>
 <body data-conta="atlas">
-<aside>
-  <div class="brand">CRM<i>.</i></div>
-  <div class="tenant" id="tenant"><button data-c="atlas">Atlas</button><button data-c="nexora">Nexora</button></div>
-  <div class="grp">Trabalho</div>
-  <button class="nav" data-v="hoje">Hoje <b id="n-hoje"></b></button>
-  <button class="nav" data-v="gmail">Caixa de e-mail <b id="n-gmail"></b></button>
-  <button class="nav" data-v="captacao">Captação <b id="n-captacao"></b></button>
-  <button class="nav" data-v="radar">Radar <b id="n-radar"></b></button>
-  <div class="grp">Funis</div>
-  <button class="nav" data-v="email">E-mail <b id="n-email"></b></button>
-  <button class="nav" data-v="whatsapp">WhatsApp <b id="n-whatsapp"></b></button>
-  <div class="grp">Gestão</div>
-  <button class="nav" data-v="painel">Painel</button>
-  <button class="nav" data-v="aprendizado">Aprendizado</button>
-  <button class="nav" data-v="financeiro">Financeiro</button>
-  <button class="nav" data-v="modelos">Modelos e follow-ups</button>
-  <button class="nav" data-v="conexoes">Conexões <b id="n-conexoes"></b></button>
-  <div class="spacer"></div>
-  <button class="nav" id="theme">Tema claro / escuro</button>
-</aside>
-<main>
-  <header>
-    <div class="hgrow"><h1 id="ttl"></h1><small id="sub"></small></div>
-    <button class="btn ghost" id="btnCaptar" hidden>Captar leads</button>
-    <button class="btn" id="btnNovo">+ Novo lead</button>
-  </header>
-  <div id="view"></div>
-</main>
-
-<dialog id="dlg">
-  <form method="dialog" id="form">
-    <h3 style="margin:0">Novo lead</h3>
-    <label>Canal<select name="canal"><option value="whatsapp">WhatsApp</option><option value="email">E-mail</option></select></label>
-    <label>Nome da empresa<input name="nome" required></label>
-    <div class="inline"><label>Contato<input name="contato"></label><label>Telefone (com DDD)<input name="telefone"></label></div>
-    <div class="inline"><label>E-mail<input name="email" type="email"></label><label>Cidade<input name="cidade"></label></div>
-    <div class="inline"><label>Site (vazio se não tem)<input name="site"></label><label>Nº de avaliações<input name="avaliacoes" type="number" min="0"></label></div>
-    <label>Fonte de captação<input name="fonte" placeholder="Google Maps, indicação"></label>
-    <div class="note" style="margin-top:12px">Sem mensagem, a IA analisa a dor e escreve a abordagem sozinha em poucos minutos.</div>
-    <div class="row"><button type="button" class="btn ghost" id="cancel">Cancelar</button><button class="btn">Salvar</button></div>
-  </form>
-</dialog>
-
-<dialog id="dlgCaptar">
-  <form method="dialog" id="formCaptar">
-    <h3 style="margin:0">Captar leads (Google Maps via Apify)</h3>
-    <label>Cidade<input name="cidade" required placeholder="Ex: Feira de Santana, BA"></label>
-    <label>Categoria<input name="categoria" required placeholder="Ex: locação de equipamentos para construção"></label>
-    <label>Quantidade máxima<input name="quantidade" type="number" min="1" max="30" value="10"></label>
-    <div class="row"><button type="button" class="btn ghost" id="cancelCaptar">Cancelar</button><button class="btn">Captar</button></div>
-  </form>
-</dialog>
-
-<dialog id="dlgMail">
-  <form method="dialog" id="formMail">
-    <h3 style="margin:0">Nova mensagem</h3>
-    <label>Para<input name="para" type="email" required></label>
-    <label>Assunto<input name="assunto" required></label>
-    <label>Mensagem<textarea name="corpo" required style="min-height:200px"></textarea></label>
-    <div class="row"><button type="button" class="btn ghost" id="cancelMail">Cancelar</button><button class="btn">Enviar</button></div>
-  </form>
-</dialog>
-
-<dialog id="dlgLead" style="width:min(640px,94vw)"><div id="leadBody"></div></dialog>
-<script src="/gmail.js"></script>
-<script src="/app.js"></script>
+<div class="app">
+  <aside class="side" id="side">
+    <div class="brand"><i data-ic="target"></i>Captação de Leads</div>
+    <div class="conta" id="conta"><button data-c="atlas">Atlas</button><button data-c="nexora">Nexora</button></div>
+    <div class="grp">Operar</div>
+    <button class="nav" data-v="hoje"><span data-ic="today"></span>Hoje<b id="b-hoje"></b></button>
+    <button class="nav" data-v="leads"><span data-ic="users"></span>Leads<b id="b-leads"></b></button>
+    <button class="nav" data-v="radar"><span data-ic="radar"></span>Radar<b id="b-radar"></b></button>
+    <button class="nav" data-v="inbox"><span data-ic="inbox"></span>Inbox<b id="b-inbox"></b></button>
+    <div class="grp">Analisar</div>
+    <button class="nav" data-v="painel"><span data-ic="chart"></span>Painel</button>
+    <button class="nav" data-v="aprendizado"><span data-ic="learn"></span>Aprendizado</button>
+    <button class="nav" data-v="financeiro"><span data-ic="wallet"></span>Financeiro</button>
+    <div class="side-foot">
+      <button class="nav" data-v="config"><span data-ic="settings"></span>Configurações</button>
+      <button class="nav" id="tema"><span data-ic="sun"></span>Tema</button>
+      <div class="saude" id="saude" title="Saúde do sistema"><i></i><span>Verificando</span></div>
+    </div>
+  </aside>
+  <main class="main" id="main"><div class="wrap">
+    <div class="top"><div><h1 id="ttl"></h1><div class="sub" id="sub"></div></div><div class="acoes" id="acoes"></div></div>
+    <div id="view"></div>
+  </div></main>
+</div>
+<nav class="tabbar" id="tabbar">
+  <button data-v="hoje"><span data-ic="today"></span>Hoje<span class="bd" id="t-hoje" hidden></span></button>
+  <button data-v="leads"><span data-ic="users"></span>Leads</button>
+  <button data-v="radar"><span data-ic="radar"></span>Radar<span class="bd" id="t-radar" hidden></span></button>
+  <button data-v="inbox"><span data-ic="inbox"></span>Inbox<span class="bd" id="t-inbox" hidden></span></button>
+  <button data-v="mais"><span data-ic="more"></span>Mais</button>
+</nav>
+<div id="overlay"></div>
+<div id="toasts"></div>
+<dialog id="dlg"></dialog>
+<script src="/js/core.js"></script>
+<script src="/js/charts.js"></script>
+<script src="/js/v-painel.js"></script>
+<script src="/js/v-hoje.js"></script>
+<script src="/js/v-leads.js"></script>
+<script src="/js/v-radar.js"></script>
+<script src="/js/v-inbox.js"></script>
+<script src="/js/v-analise.js"></script>
+<script src="/js/v-config.js"></script>
+<script src="/js/main.js"></script>
 </body>
 </html>

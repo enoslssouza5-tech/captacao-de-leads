@@ -2,77 +2,47 @@
 
 - Leads de e-mail da Nexora: leitura do SQLite existente; respostas e follow-ups sao aplicados nele pelo modulo mail.
 - WhatsApp: observador somente leitura (wa-watcher). Detecta envios e respostas sozinho. NUNCA envia mensagem.
-- IA via `claude -p` local. Agendador em segundo plano cuida de Gmail, classificacao, follow-ups, analise e captacao.
+- IA via `claude -p` local. Workers em segundo plano (workers.py) cuidam de Gmail, IA, captacao, envio e backup.
 
 Uso: python server.py   (http://127.0.0.1:4400, so acessivel na propria maquina)
 """
 import json
 import os
-import subprocess
+import re
+import socket
 import sys
-import threading
-import time
-import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 import mail  # noqa: F401  (ajusta o sys.path para os modulos do Nexora)
 import gmail_ui
+import backup
 import ia
+import nexora_ops
+import painel
+import painel_extra
 import pipeline
+import regras
 import store
+import workers
 from store import CONTAS, CANAIS, ETAPAS, CLASSES, crm, now
+from workers import WAM, spawn, log
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PORT = int(os.environ.get("PORT", "4400"))
-WA_DIR = os.path.join(HERE, "wa-watcher")
-LOG = os.path.join(HERE, "crm.log")
-STATIC = {"/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/styles.css": "styles.css", "/mail.css": "mail.css", "/gmail.js": "gmail.js"}
+STATIC = {"/": "index.html", "/index.html": "index.html"}
 MIME = {".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8"}
-
-WA = {"estado": "parado", "qr": None, "motivo": None, "proc": None}
-_lock = threading.Lock()
-
-
-def log(msg):
-    with open(LOG, "a", encoding="utf-8") as f:
-        f.write("[%s] %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg))
-
-
-def spawn(fn, *args):
-    def run():
-        try:
-            fn(*args)
-        except Exception:
-            log("erro em thread %s: %s" % (fn.__name__, traceback.format_exc()[-400:]))
-    threading.Thread(target=run, daemon=True).start()
-
-
-# ---------- WhatsApp (observador) ----------
-def wa_start():
-    with _lock:
-        if WA["proc"] and WA["proc"].poll() is None:
-            return
-        if not os.path.exists(os.path.join(WA_DIR, "node_modules")):
-            WA.update(estado="erro", motivo="rode npm install em crm/wa-watcher")
-            return
-        WA["proc"] = subprocess.Popen(["node", "wa-watcher.js"], cwd=WA_DIR, stdout=open(os.path.join(WA_DIR, "watcher.log"), "a"), stderr=subprocess.STDOUT)
-        WA.update(estado="iniciando", qr=None, motivo=None)
-
-
-def wa_stop():
-    with _lock:
-        if WA["proc"] and WA["proc"].poll() is None:
-            WA["proc"].terminate()
-        WA.update(estado="parado", qr=None, proc=None)
 
 
 def wa_evento(d):
+    """Evento vindo do observador: envio detectado ou resposta recebida. So guarda conversa de numeros que sao leads."""
     c = crm()
     try:
         lead = store.achar_lead_por_telefone(c, d.get("telefone"))
         if not lead:
             return {"ignorado": True}
+        c.execute("INSERT INTO wa_mensagens (lead_ref, direcao, texto, tipo, ts_msg, created_at) VALUES (?,?,?,?,?,?)",
+                  (lead["ref"], d.get("direcao"), (d.get("texto") or "")[:4000], d.get("tipo"), d.get("ts"), now()))
         if d.get("direcao") == "saida":
             if lead["etapa"] in ("Novo", "Pronto"):
                 store.marcar_primeiro_envio(c, lead, "whatsapp_auto")
@@ -80,6 +50,8 @@ def wa_evento(d):
                 t = store.followup_devido_para(c, lead["ref"])
                 if t:
                     store.concluir_tarefa(c, t["id"], "whatsapp_auto", 1)
+                else:
+                    store.registrar_envio(c, lead, 99, "whatsapp_manual")      # resposta/conversa do usuario: zera "aguardando voce"
             c.commit()
             return {"ok": True, "acao": "envio_detectado"}
         store.registrar_resposta(c, lead, d.get("texto") or "", None, origem="whatsapp")
@@ -88,68 +60,6 @@ def wa_evento(d):
         return {"ok": True, "acao": "resposta_registrada"}
     finally:
         c.close()
-
-
-# ---------- agendador ----------
-def loop_leitura():
-    """Gmail (5 em 5 min), classificacao pendente e adaptacao dos follow-ups."""
-    ultimo_sync = 0
-    while True:
-        try:
-            if time.time() - ultimo_sync > 300:
-                ultimo_sync = time.time()
-                for conta in CONTAS:
-                    if mail.status()[conta]["configurado"]:
-                        r = mail.sync(conta)
-                        if r.get("novas"):
-                            log("gmail %s: %d respostas novas" % (conta, r["novas"]))
-            mail.reclassificar()
-            c = crm()
-            auto_analise = store.cfg_get(c, "auto_analisar", "1") == "1"
-            prox = pipeline.proximo_para_analise(c) if auto_analise else None
-            c.close()
-            pipeline.adaptar_followup()
-            if prox:
-                pipeline.analisar_lead(prox)
-            _captacao_diaria()
-        except Exception:
-            log("loop_leitura: " + traceback.format_exc()[-400:])
-        time.sleep(45)
-
-
-def _captacao_diaria():
-    c = crm()
-    try:
-        raw = store.cfg_get(c, "captar_atlas", "")
-        if not raw:
-            return
-        cfg = json.loads(raw)
-        if not cfg.get("ativo") or cfg.get("ultima") == store.hoje() or not cfg.get("cidades"):
-            return
-        cidade = cfg["cidades"][cfg.get("indice", 0) % len(cfg["cidades"])]
-        cfg["ultima"], cfg["indice"] = store.hoje(), cfg.get("indice", 0) + 1
-        store.cfg_set(c, "captar_atlas", json.dumps(cfg, ensure_ascii=False))
-    finally:
-        c.close()
-    pipeline.captar_job("atlas", cidade, cfg.get("categoria", "locacao de equipamentos para construcao"), int(cfg.get("quantidade", 10)))
-
-
-def loop_envio():
-    """Envio de e-mail (follow-ups e aprovados da Atlas), respeitando cap diario e intervalo entre envios."""
-    while True:
-        try:
-            for conta in CONTAS:
-                if mail.status()[conta]["configurado"]:
-                    r = mail.enviar_followups(conta)
-                    if r.get("enviados"):
-                        log("follow-ups de e-mail enviados (%s): %d" % (conta, r["enviados"]))
-            if mail.status()["atlas"]["configurado"]:
-                r = mail.enviar_atlas_aprovados()
-                if r.get("enviados"):
-                    log("e-mails da Atlas enviados: %d" % r["enviados"])
-        except Exception:
-            log("loop_envio: " + traceback.format_exc()[-400:])
-        time.sleep(600)
 
 
 # ---------- HTTP ----------
@@ -166,6 +76,23 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _seguro(self, escrita):
+        """Bloqueia CSRF e DNS rebinding: so aceita Host local, Origin local (quando existir) e JSON nas escritas."""
+        host = (self.headers.get("Host") or "").lower()
+        porta = self.server.server_address[1]
+        aceitos = {"127.0.0.1:%d" % porta, "localhost:%d" % porta}
+        if host not in aceitos:
+            self.send(403, {"erro": "host nao permitido"})
+            return False
+        origem = self.headers.get("Origin")
+        if origem and origem.lower() not in {"http://" + a for a in aceitos}:
+            self.send(403, {"erro": "origem nao permitida"})
+            return False
+        if escrita and not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
+            self.send(415, {"erro": "use application/json"})
+            return False
+        return True
+
     def body(self):
         n = int(self.headers.get("Content-Length") or 0)
         try:
@@ -174,31 +101,56 @@ class H(BaseHTTPRequestHandler):
             return {}
 
     def do_GET(self):
+        if not self._seguro(False):
+            return
         u = urlparse(self.path)
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
-        if u.path in STATIC:
-            with open(os.path.join(HERE, STATIC[u.path]), "rb") as fh:
-                return self.send(200, fh.read(), MIME[os.path.splitext(STATIC[u.path])[1]])
+        alvo = STATIC.get(u.path)
+        if alvo is None and re.fullmatch(r"/(js/[a-z0-9\-]+\.js|css/[a-z0-9\-]+\.css)", u.path):
+            alvo = u.path[1:]
+        if alvo:
+            arq = os.path.join(HERE, alvo)
+            if not os.path.isfile(arq):
+                return self.send(404, {"erro": "nao encontrado"})
+            with open(arq, "rb") as fh:
+                return self.send(200, fh.read(), MIME[os.path.splitext(alvo)[1]])
         conta, canal = q.get("conta"), q.get("canal")
         if u.path == "/api/ping":
             c = crm()
             ult = c.execute("SELECT COALESCE(MAX(id),0) FROM respostas").fetchone()[0]
             ult_cls = c.execute("SELECT texto, classificacao, lead_ref FROM respostas ORDER BY id DESC LIMIT 1").fetchone()
             c.close()
-            return self.send(200, {"ultima_resposta": ult, "ultima": dict(ult_cls) if ult_cls else None, "wa": WA["estado"]})
+            return self.send(200, {"ultima_resposta": ult, "ultima": dict(ult_cls) if ult_cls else None, "wa": WAM.estado})
         if u.path == "/api/conexoes":
             c = crm()
             cfg = {k: store.cfg_get(c, k, d) for k, d in (("auto_followup_email_nexora", "0"), ("auto_followup_email_atlas", "0"), ("auto_analisar", "1"), ("captar_atlas", ""))}
             jobs = [dict(r) for r in c.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 12")]
             c.close()
-            return self.send(200, {"whatsapp": {"estado": WA["estado"], "qr": WA["qr"], "motivo": WA["motivo"]}, "gmail": mail.status(), "config": cfg, "jobs": jobs})
+            return self.send(200, {"whatsapp": WAM.publico(), "gmail": mail.status(), "config": cfg, "jobs": jobs})
+        if u.path == "/api/nexora/envio":
+            return self.send(200, nexora_ops.status_envio())
+        if conta in CONTAS and u.path == "/api/painel":
+            return self.send(200, painel.painel(conta, max(7, min(int(q.get("dias", 30)), 90))))
+        if conta in CONTAS and u.path == "/api/acoes":
+            return self.send(200, painel.acoes(conta))
+        if conta in CONTAS and u.path == "/api/conversas":
+            return self.send(200, {"conversas": painel.conversas_whatsapp(conta)})
+        if u.path == "/api/saude":
+            return self.send(200, workers.saude())
+        if u.path == "/api/wa/conversa":
+            c = crm()
+            msgs = [dict(r) for r in c.execute("SELECT direcao, texto, tipo, ts_msg, created_at FROM wa_mensagens WHERE lead_ref=? ORDER BY id", (q.get("ref", ""),))]
+            c.close()
+            return self.send(200, {"mensagens": msgs})
         if u.path == "/api/lead":
             c = crm()
             l = store.get_lead(c, q.get("ref", ""))
             resp = [dict(r) for r in c.execute("SELECT * FROM respostas WHERE lead_ref=? ORDER BY id", (q.get("ref", ""),))]
             tar = [dict(r) for r in c.execute("SELECT * FROM tarefas WHERE lead_ref=? ORDER BY passo", (q.get("ref", ""),))]
+            evs = [dict(r) for r in c.execute("SELECT tipo, de_etapa, para_etapa, ts FROM eventos WHERE lead_ref=? ORDER BY id", (q.get("ref", ""),))]
+            wa = [dict(r) for r in c.execute("SELECT direcao, texto, tipo, created_at FROM wa_mensagens WHERE lead_ref=? ORDER BY id", (q.get("ref", ""),))]
             c.close()
-            return self.send(200 if l else 404, {"lead": l, "respostas": resp, "tarefas": tar})
+            return self.send(200 if l else 404, {"lead": l, "respostas": resp, "tarefas": tar, "eventos": evs, "whatsapp": wa})
         if conta in CONTAS and u.path.startswith("/api/gmail/"):
             try:
                 if u.path == "/api/gmail/pastas":
@@ -212,8 +164,10 @@ class H(BaseHTTPRequestHandler):
         if conta in CONTAS:
             if u.path == "/api/board" and canal in CANAIS:
                 return self.send(200, store.board(conta, canal))
-            simples = {"/api/hoje": store.hoje_view, "/api/stats": store.stats, "/api/captacao": store.captacao, "/api/financeiro": store.financeiro,
-                       "/api/radar": store.radar, "/api/aprendizado": store.aprendizado}
+            if u.path == "/api/aprendizado":
+                return self.send(200, painel_extra.aprendizado_completo(conta, int(q.get("tz", 0))))
+            simples = {"/api/hoje": store.hoje_view, "/api/stats": store.stats, "/api/captacao": store.captacao, "/api/financeiro": painel_extra.financeiro_completo,
+                       "/api/radar": painel_extra.radar_completo}
             if u.path in simples:
                 return self.send(200, simples[u.path](conta))
             if u.path == "/api/modelos":
@@ -224,20 +178,41 @@ class H(BaseHTTPRequestHandler):
         self.send(404, {"erro": "nao encontrado"})
 
     def do_POST(self):
+        if not self._seguro(True):
+            return
         u = urlparse(self.path)
         d = self.body()
         p = u.path.strip("/").split("/")
         if u.path == "/api/wa/event":
             return self.send(200, wa_evento(d))
         if u.path == "/api/wa/status":
-            WA.update(estado=d.get("estado", WA["estado"]), qr=d.get("qr") if d.get("estado") == "qr" else None, motivo=d.get("motivo"))
+            WAM.receber_status(d)
             return self.send(200, {"ok": True})
         if u.path == "/api/wa/start":
-            wa_start()
+            if not os.path.exists(os.path.join(workers.WA_DIR, "node_modules")):
+                return self.send(500, {"erro": "dependencias do observador nao instaladas (npm install em crm/wa-watcher)"})
+            WAM.iniciar(manual=True)
             return self.send(200, {"ok": True})
         if u.path == "/api/wa/stop":
-            wa_stop()
+            WAM.parar()
             return self.send(200, {"ok": True})
+        if u.path == "/api/wa/novo-qr":
+            WAM.novo_qr()
+            return self.send(200, {"ok": True})
+        if u.path.startswith("/api/nexora/"):
+            try:
+                if u.path == "/api/nexora/aprovar":
+                    return self.send(200, {"aprovados": nexora_ops.aprovar(d.get("ids", []))})
+                if u.path == "/api/nexora/rejeitar":
+                    return self.send(200, {"rejeitados": nexora_ops.rejeitar(d.get("ids", []), d.get("motivo", ""))})
+                if u.path == "/api/nexora/suprimir":
+                    nexora_ops.suprimir(d.get("id"), d.get("motivo") or "Solicitacao de remocao (opt-out).")
+                    return self.send(200, {"ok": True})
+                if u.path == "/api/nexora/enviar":
+                    return self.send(200, nexora_ops.enviar_agora())
+            except nexora_ops.Bloqueado as e:
+                return self.send(e.codigo, {"erro": str(e)})
+            return self.send(404, {"erro": "nao encontrado"})
         if u.path == "/api/gmail/send" and d.get("conta") in CONTAS:
             try:
                 gmail_ui.enviar(d["conta"], d.get("para", ""), d.get("assunto", ""), d.get("corpo", ""), d.get("thread_id"), d.get("in_reply_to"), d.get("references"))
@@ -257,6 +232,10 @@ class H(BaseHTTPRequestHandler):
             if conta in CONTAS:
                 spawn(mail.sync, conta)
             return self.send(200, {"ok": True})
+        if u.path == "/api/validar":
+            if d.get("conta") not in CONTAS or d.get("canal") not in CANAIS or d.get("tipo") not in ("primeiro", "followup"):
+                return self.send(400, {"erro": "conta, canal e tipo invalidos"})
+            return self.send(200, {"violacoes": regras.validar(d["conta"], d["canal"], d["tipo"], d.get("texto", ""), None, bool(d.get("link")))})
         if u.path == "/api/traduzir":
             try:
                 para = "portugues do Brasil" if d.get("para") == "pt" else "ingles americano"
@@ -372,16 +351,51 @@ class H(BaseHTTPRequestHandler):
             c.close()
 
 
-if __name__ == "__main__":
+class Servidor(ThreadingHTTPServer):
+    """Reserva a porta de forma exclusiva: um segundo servidor falha ao subir em vez de dividir a porta (Windows)."""
+    allow_reuse_address = False
+    daemon_threads = True
+
+    def server_bind(self):
+        if sys.platform == "win32" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def criar_servidor(porta=PORT):
+    return Servidor(("127.0.0.1", porta), H)
+
+
+def verificar_bancos():
+    """Antes de subir: confere a integridade do banco do CRM e restaura o ultimo backup bom se estiver corrompido."""
+    r = backup.verificar_e_restaurar(store.CRM_DB, workers.BACKUP_DIR, "crm")
+    if r["acao"] == "restaurado":
+        log.error("BANCO DO CRM CORROMPIDO: restaurado de %s (o arquivo ruim ficou em %s)", r["backup"], r["arquivo_corrompido"])
+    elif r["acao"] == "sem_backup":
+        log.error("BANCO DO CRM CORROMPIDO e sem backup integro disponivel: %s", r["arquivo"])
+    if os.path.exists(store.NEXORA_DB) and not backup.integridade_ok(store.NEXORA_DB):
+        log.error("BANCO DA NEXORA com problema de integridade (nao mexo nele sozinho): %s", store.NEXORA_DB)
+
+
+def main():
+    workers.configurar_log()
+    verificar_bancos()
     crm().close()
-    if os.path.exists(os.path.join(WA_DIR, ".session")):
-        wa_start()
-    spawn(loop_leitura)
-    spawn(loop_envio)
-    srv = ThreadingHTTPServer(("127.0.0.1", PORT), H)
+    try:
+        srv = criar_servidor()          # 1) reserva a porta ANTES de ligar qualquer worker
+    except OSError as e:
+        log.error("porta %d ocupada (%s): ja existe um CRM rodando. Encerrando.", PORT, e)
+        print("O CRM ja esta rodando em http://127.0.0.1:%d" % PORT)
+        sys.exit(2)                     # codigo 2 = ja existe outra copia (o .bat nao tenta de novo)
+    workers.iniciar_todos()             # 2) so entao inicia workers e o observador do WhatsApp
     print("CRM em http://127.0.0.1:%d" % PORT)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
-        wa_stop()
-        sys.exit(0)
+        pass
+    finally:
+        WAM.parar()
+
+
+if __name__ == "__main__":
+    main()

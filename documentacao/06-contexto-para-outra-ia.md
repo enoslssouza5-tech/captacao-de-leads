@@ -35,10 +35,10 @@ Meta: máximo de automação, custo zero, com o humano só onde há risco (aprov
 - `crm/server.py`: HTTP e agendador (2 threads: leitura e envio).
 - `crm/store.py`: banco, funil, follow-ups, radar, aprendizado, financeiro.
 - `crm/mail.py`: leitura e envio pelo Gmail, cruzamento com leads, classificação.
-- `crm/gmail_ui.py` e `crm/gmail.js`: tela estilo Gmail.
+- `crm/gmail_ui.py` e `crm/js/v-inbox.js`: tela estilo Gmail e conversas do WhatsApp (somente leitura).
 - `crm/ia.py` e `crm/pipeline.py`: IA (classificar, analisar dor, follow-up, captar, revisão semanal).
 - `crm/wa-watcher/wa-watcher.js`: observador do WhatsApp (whatsapp-web.js), envia eventos ao CRM por HTTP.
-- Interface: `crm/index.html`, `app.js`, `gmail.js`, `styles.css`, `mail.css`.
+- Interface: `crm/index.html`, `crm/css/app.css`, `crm/js/*.js` (roteamento por hash `#/conta/tela`).
 - Dados: `crm/crm.sqlite3` (CRM) e `_opensquad/_memory/nexora/db/nexora.sqlite3` (leads e e-mails da Nexora, lidos e atualizados nas respostas).
 - Reaproveitado da Nexora: `gmail_api.py`, `token_store.py`, `db.py`, `env_loader.py`, `send_gmail.py` (em `_opensquad/_memory/nexora/scripts/`).
 - Funil único: Novo, Pronto, Contatado, Respondeu, Negociando, Fechado, Perdido.

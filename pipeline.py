@@ -78,13 +78,19 @@ def analisar_lead(lid):
     jid = _job(c, "analise", r["conta"], "rodando", r["nome"])
     try:
         d = ia.analyze_lead({k: r[k] for k in ("nome", "cidade", "site", "telefone", "email", "avaliacoes", "nota_google", "fonte", "notas")})
-        mensagem = d.get("email") if r["canal"] == "email" else d.get("mensagem")
+        campo = "email" if r["canal"] == "email" else "mensagem"
+        mensagem = d.get(campo)
+        reprovada = (d.get("violacoes") or {}).get(campo)
+        nota = r["notas"]
+        if reprovada:                       # a mensagem quebra as regras de copy: nao entra na fila
+            mensagem = None
+            nota = ((nota or "") + "\nMensagem reprovada nas regras: " + "; ".join(reprovada)).strip()
         etapa = "Pronto" if (mensagem and r["etapa"] == "Novo") else r["etapa"]
-        c.execute("UPDATE leads SET dor=?, tipo_dor=?, criterios_json=?, mensagem=?, assunto=COALESCE(?, assunto), etapa=?, updated_at=? WHERE id=?",
+        c.execute("UPDATE leads SET dor=?, tipo_dor=?, criterios_json=?, mensagem=?, assunto=COALESCE(?, assunto), etapa=?, notas=?, updated_at=? WHERE id=?",
                   (d.get("dor"), d.get("tipo_dor"), json.dumps({"criterios": d.get("criterios"), "evidencias": d.get("evidencias")}, ensure_ascii=False),
-                   mensagem, d.get("assunto"), etapa, store.now(), lid))
+                   mensagem, d.get("assunto"), etapa, nota, store.now(), lid))
         c.commit()
-        _job_fim(c, jid, "ok", d.get("dor") or "")
+        _job_fim(c, jid, "aviso" if reprovada else "ok", ("MENSAGEM REPROVADA: " + "; ".join(reprovada)) if reprovada else (d.get("dor") or ""))
     except Exception as e:
         c.execute("UPDATE leads SET dor=COALESCE(dor,'(analise falhou, tente de novo)') WHERE id=?", (lid,))
         c.commit()

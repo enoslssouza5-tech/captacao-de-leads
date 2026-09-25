@@ -1,4 +1,4 @@
-"""Monta crm/demo/captacao-de-leads-demo com a interface do CRM + API falsa (dados fictícios) para publicar na Vercel.
+"""Monta crm/demo/captacao-de-leads-demo com a interface do CRM + API falsa (dados ficticios) para publicar na Vercel.
 
 Uso: py demo/montar.py   (depois: cd demo/captacao-de-leads-demo e npx vercel --prod --yes)
 """
@@ -10,18 +10,21 @@ CRM = os.path.dirname(AQUI)
 DIST = os.path.join(AQUI, "captacao-de-leads-demo")
 
 shutil.rmtree(DIST, ignore_errors=True)
-os.makedirs(DIST)
-for f in ("app.js", "gmail.js", "styles.css", "mail.css"):
-    shutil.copy(os.path.join(CRM, f), DIST)
-shutil.copy(os.path.join(AQUI, "mock-api.js"), DIST)
+os.makedirs(os.path.join(DIST, "js"))
+os.makedirs(os.path.join(DIST, "css"))
+for f in sorted(os.listdir(os.path.join(CRM, "js"))):
+    shutil.copy(os.path.join(CRM, "js", f), os.path.join(DIST, "js", f))
+shutil.copy(os.path.join(CRM, "css", "app.css"), os.path.join(DIST, "css", "app.css"))
+shutil.copy(os.path.join(AQUI, "mock-api.js"), os.path.join(DIST, "js", "mock-api.js"))
 
 with open(os.path.join(CRM, "index.html"), encoding="utf-8") as fh:
     html = fh.read()
-html = html.replace("<title>Nexora e Atlas CRM</title>", "<title>Captação de Leads (demonstração)</title>")
-html = html.replace('<script src="/gmail.js"></script>', '<script src="/mock-api.js"></script>\n<script src="/gmail.js"></script>')
-faixa = ('<div style="position:fixed;bottom:0;left:0;right:0;z-index:50;background:#f5b73b;color:#3a2a00;text-align:center;padding:6px;font:13px system-ui">'
-         "Demonstração com dados fictícios. Nada aqui é real nem é salvo.</div>")
+html = html.replace("<title>Captação de Leads</title>", "<title>Captação de Leads (demonstração)</title>")
+html = html.replace('<script src="/js/core.js"></script>', '<script src="/js/mock-api.js"></script>\n<script src="/js/core.js"></script>')
+faixa = ('<div style="position:fixed;top:0;left:0;right:0;z-index:90;background:#f0b34a;color:#3a2a00;text-align:center;padding:5px;font:12.5px system-ui">'
+         "Demonstração com dados fictícios. Nada aqui é real nem é salvo.</div>"
+         "<style>.app{padding-top:28px}.side{padding-top:34px}@media(max-width:820px){.wrap{padding-top:28px}}</style>")
 html = html.replace("</body>", faixa + "\n</body>")
 with open(os.path.join(DIST, "index.html"), "w", encoding="utf-8") as fh:
     fh.write(html)
-print("dist pronto em", DIST)
+print("pronto em", DIST)

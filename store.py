@@ -2,13 +2,14 @@
 import json
 import os
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-NEXORA_DB = os.path.join(ROOT, "_opensquad", "_memory", "nexora", "db", "nexora.sqlite3")
-CRM_DB = os.path.join(HERE, "crm.sqlite3")
+NEXORA_DB = os.environ.get("CRM_NEXORA_DB") or os.path.join(ROOT, "_opensquad", "_memory", "nexora", "db", "nexora.sqlite3")
+CRM_DB = os.environ.get("CRM_DB") or os.path.join(HERE, "crm.sqlite3")
 WA_DAILY_CAP = int(os.environ.get("WA_DAILY_CAP", "15"))
 EMAIL_DAILY_CAP = int(os.environ.get("EMAIL_DAILY_CAP", "20"))
 
@@ -40,9 +41,24 @@ def _cols(c, tabela):
     return {r[1] for r in c.execute("PRAGMA table_info(%s)" % tabela)}
 
 
+_migrados = set()
+_migracao_lock = threading.Lock()
+
+
 def crm():
     c = sqlite3.connect(CRM_DB, timeout=30)
     c.row_factory = sqlite3.Row
+    c.execute("PRAGMA busy_timeout=30000")
+    if CRM_DB not in _migrados:
+        with _migracao_lock:
+            if CRM_DB not in _migrados:
+                _migrar(c)
+                _migrados.add(CRM_DB)
+    return c
+
+
+def _migrar(c):
+    c.execute("PRAGMA journal_mode=WAL")
     c.executescript(
         """
         CREATE TABLE IF NOT EXISTS leads (
@@ -80,6 +96,26 @@ def crm():
         CREATE TABLE IF NOT EXISTS jobs (
           id INTEGER PRIMARY KEY AUTOINCREMENT, tipo TEXT, conta TEXT, status TEXT, detalhe TEXT, created_at TEXT, updated_at TEXT);
         CREATE TABLE IF NOT EXISTS gmail_vistos (conta TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY(conta, message_id));
+        CREATE TABLE IF NOT EXISTS wa_mensagens (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, lead_ref TEXT NOT NULL, direcao TEXT NOT NULL, texto TEXT, tipo TEXT,
+          ts_msg INTEGER, created_at TEXT);
+        CREATE TABLE IF NOT EXISTS eventos (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, lead_ref TEXT NOT NULL, conta TEXT NOT NULL, canal TEXT, tipo TEXT NOT NULL,
+          de_etapa TEXT, para_etapa TEXT, ts TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS idx_eventos_conta ON eventos(conta, tipo, ts);
+        CREATE TRIGGER IF NOT EXISTS trg_leads_criado AFTER INSERT ON leads BEGIN
+          INSERT INTO eventos (lead_ref, conta, canal, tipo, de_etapa, para_etapa, ts)
+          VALUES ('c' || NEW.id, NEW.conta, NEW.canal, 'criado', NULL, NEW.etapa, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+        END;
+        CREATE TRIGGER IF NOT EXISTS trg_leads_etapa AFTER UPDATE OF etapa ON leads WHEN OLD.etapa <> NEW.etapa BEGIN
+          INSERT INTO eventos (lead_ref, conta, canal, tipo, de_etapa, para_etapa, ts)
+          VALUES ('c' || NEW.id, NEW.conta, NEW.canal, 'etapa', OLD.etapa, NEW.etapa, strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+        END;
+        CREATE INDEX IF NOT EXISTS idx_leads_conta_canal ON leads(conta, canal, etapa);
+        CREATE INDEX IF NOT EXISTS idx_tarefas_status ON tarefas(status, due_date);
+        CREATE INDEX IF NOT EXISTS idx_respostas_lead ON respostas(lead_ref);
+        CREATE INDEX IF NOT EXISTS idx_envios_conta ON envios(conta, canal, enviado_em);
+        CREATE INDEX IF NOT EXISTS idx_wa_lead ON wa_mensagens(lead_ref);
         """
     )
     for tab, col, tipo in (("leads", "tipo_dor", "TEXT"), ("leads", "criterios_json", "TEXT"), ("leads", "assunto", "TEXT"), ("leads", "aprovado", "INTEGER DEFAULT 0"),
@@ -90,7 +126,6 @@ def crm():
     for (conta, passo), texto in MODELOS_PADRAO.items():
         c.execute("INSERT OR IGNORE INTO modelos (conta, passo, texto) VALUES (?,?,?)", (conta, passo, texto))
     c.commit()
-    return c
 
 
 def cfg_get(c, chave, padrao="0"):
@@ -141,14 +176,15 @@ def nexora_leads():
         return []
     out = []
     for r in n.execute("SELECT id, empresa, segmento, cidade_estado, email, status, status_negociacao, resposta_classificacao, review_count, "
-                       "landing_page_status, selected_subject, assunto, sent_at, responded_at, site, fonte FROM leads ORDER BY id DESC"):
+                       "landing_page_status, selected_subject, assunto, sent_at, responded_at, site, fonte, created_at FROM leads ORDER BY id DESC"):
         lp = r["landing_page_status"]
         out.append({
             "id": "n%d" % r["id"], "ref": "n%d" % r["id"], "conta": "nexora", "canal": "email", "nome": r["empresa"], "sub": r["cidade_estado"] or "",
             "email": r["email"], "tag": "real estate" if r["segmento"] == "real_estate" else "law firm", "etapa": etapa_nexora(r),
             "nota": r["selected_subject"] or r["assunto"] or "", "readonly": True, "score": score_nexora(r["review_count"], lp),
             "avaliacoes": r["review_count"], "site": r["site"], "fonte": r["fonte"], "sent_at": r["sent_at"], "responded_at": r["responded_at"],
-            "aprovado": r["status"] == "aprovado", "assunto": r["assunto"],
+            "aprovado": r["status"] == "aprovado", "assunto": r["assunto"], "created_at": r["created_at"], "status_raw": r["status"],
+            "neg": r["status_negociacao"], "resposta_cl": r["resposta_classificacao"],
             "tipo_dor": {"absent": "sem_landing", "present_with_issue": "landing_com_problema", "uncertain": "landing_incerta"}.get(lp, "site_ok"),
             "sinais": [s for s in (("sem landing" if lp == "absent" else None), ("landing com problema" if lp == "present_with_issue" else None)) if s],
         })
@@ -175,6 +211,14 @@ def get_lead(c, ref):
     if ref.startswith("n"):
         for l in nexora_leads():
             if l["id"] == ref:
+                n = nexora_ro()
+                if n:
+                    try:
+                        r = n.execute("SELECT corpo_texto, selected_subject, assunto FROM leads WHERE id=?", (int(ref[1:]),)).fetchone()
+                        if r:
+                            l = dict(l, corpo_texto=r["corpo_texto"], assunto=r["selected_subject"] or r["assunto"])
+                    finally:
+                        n.close()
                 return l
         return None
     r = c.execute("SELECT * FROM leads WHERE id=?", (int(ref[1:]),)).fetchone()
@@ -184,17 +228,36 @@ def get_lead(c, ref):
 
 
 # ---------- funil ----------
+def proxima_acao(etapa, canal, aprovado, due):
+    """Texto curto do que fazer a seguir com o lead (usado nos cards do funil)."""
+    if etapa == "Novo":
+        return "Analisar a dor"
+    if etapa == "Pronto":
+        return "Enviar no WhatsApp" if canal == "whatsapp" else ("Enviar (aprovado)" if aprovado else "Aprovar o e-mail")
+    if etapa == "Contatado":
+        if due:
+            dias = (datetime.fromisoformat(due).date() - datetime.now(timezone.utc).date()).days
+            return "Follow-up hoje" if dias <= 0 else "Follow-up em %d dia%s" % (dias, "" if dias == 1 else "s")
+        return "Sequencia concluida"
+    return {"Respondeu": "Responder", "Negociando": "Avancar a negociacao", "Fechado": "Entregar e acompanhar"}.get(etapa, "")
+
+
 def board(conta, canal):
     cards = {e: [] for e in ETAPAS}
-    if conta == "nexora" and canal == "email":
-        for l in nexora_leads():
-            cards[l["etapa"]].append(l)
-        return {"etapas": ETAPAS, "cards": cards, "readonly": True}
     c = crm()
-    for r in c.execute("SELECT * FROM leads WHERE conta=? AND canal=? ORDER BY id DESC", (conta, canal)):
-        cards.setdefault(r["etapa"], []).append(dict(r, id="c%d" % r["id"], ref="c%d" % r["id"], sub=r["cidade"] or "", tag=r["fonte"] or "", score=score_crm(r), readonly=False))
-    c.close()
-    return {"etapas": ETAPAS, "cards": cards, "readonly": False}
+    try:
+        due = {r["lead_ref"]: r["d"] for r in c.execute("SELECT lead_ref, MIN(due_date) d FROM tarefas WHERE conta=? AND status='pendente' GROUP BY lead_ref", (conta,))}
+        if conta == "nexora" and canal == "email":
+            for l in nexora_leads():
+                l["proxima"] = proxima_acao(l["etapa"], "email", l.get("aprovado"), due.get(l["ref"]))
+                cards[l["etapa"]].append(l)
+            return {"etapas": ETAPAS, "cards": cards, "readonly": True}
+        for r in c.execute("SELECT * FROM leads WHERE conta=? AND canal=? ORDER BY id DESC", (conta, canal)):
+            cards.setdefault(r["etapa"], []).append(dict(r, id="c%d" % r["id"], ref="c%d" % r["id"], sub=r["cidade"] or "", tag=r["fonte"] or "", score=score_crm(r), readonly=False,
+                                                         proxima=proxima_acao(r["etapa"], canal, r["aprovado"], due.get("c%d" % r["id"]))))
+        return {"etapas": ETAPAS, "cards": cards, "readonly": False}
+    finally:
+        c.close()
 
 
 def captacao(conta):
@@ -318,6 +381,16 @@ def classificar_existente(c, resp_row, res):
         registrar_resposta_efeito(c, lead, res["classificacao"])
 
 
+def _pode_mover_para(nova):
+    """Etapas de origem permitidas. O funil so avanca: resposta fraca nunca tira o lead de Negociando/Fechado;
+    recusa/devolucao pode encerrar qualquer lead que nao esteja Fechado."""
+    if nova == "Perdido":
+        return ["Novo", "Pronto", "Contatado", "Respondeu", "Negociando"]
+    if nova == "Negociando":
+        return ["Novo", "Pronto", "Contatado", "Respondeu"]
+    return ["Novo", "Pronto", "Contatado"]
+
+
 def registrar_resposta_efeito(c, lead, cls):
     """Aplica so o efeito no funil de uma resposta ja gravada (usado ao classificar depois)."""
     tmp_ref = lead["ref"]
@@ -326,7 +399,8 @@ def registrar_resposta_efeito(c, lead, cls):
     cancelar_tarefas(c, tmp_ref)
     if tmp_ref.startswith("c"):
         nova = {"recusou": "Perdido", "bounce": "Perdido", "reuniao": "Negociando"}.get(cls, "Respondeu")
-        c.execute("UPDATE leads SET etapa=?, updated_at=? WHERE id=? AND etapa<>'Fechado'", (nova, now(), int(tmp_ref[1:])))
+        c.execute("UPDATE leads SET etapa=?, updated_at=? WHERE id=? AND etapa IN (%s)" % ",".join("'%s'" % e for e in _pode_mover_para(nova)),
+                  (nova, now(), int(tmp_ref[1:])))
         if cls in ("recusou", "bounce"):
             for chave in (lead.get("telefone"), lead.get("email")):
                 if chave:
@@ -392,7 +466,7 @@ def aprendizado(conta):
                 b["respostas"] += 1
                 if cl in ("interessado", "duvida", "reuniao"):
                     b["interessados"] += 1
-        return [{"chave": k, **v, "taxa": round(v["respostas"] / v["envios"] * 100) if v["envios"] else 0} for k, v in sorted(g.items(), key=lambda kv: -kv[1]["envios"])]
+        return [{"chave": k, **v, "taxa": int(v["respostas"] * 100 / v["envios"] + 0.5) if v["envios"] else 0} for k, v in sorted(g.items(), key=lambda kv: -kv[1]["envios"])]
 
     def hora(e):
         try:

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from email.mime.text import MIMEText
 
@@ -18,6 +19,9 @@ from env_loader import load_env, load_client_credentials, is_postal_address_veri
 
 import ia  # noqa: E402
 import store  # noqa: E402
+
+if os.environ.get("CRM_NEXORA_DB"):          # testes: nunca escrever no banco real da Nexora
+    ndb.DB_PATH = os.environ["CRM_NEXORA_DB"]
 
 ATLAS_DIR = os.path.join(HERE, "atlas_gmail")
 ATLAS_TOKEN = os.path.join(ATLAS_DIR, "token.json")
@@ -91,7 +95,9 @@ def _nexora_apply(lead_id, email, cat8, cls, texto):
             elif cls == "reuniao":
                 ndb.set_negotiation_status(conn, lead_id, "em_negociacao")
             else:
-                ndb.set_negotiation_status(conn, lead_id, "respondido")
+                atual = conn.execute("SELECT status_negociacao FROM leads WHERE id=?", (lead_id,)).fetchone()
+                if not atual or atual["status_negociacao"] not in ("em_negociacao", "fechado"):     # nunca regride
+                    ndb.set_negotiation_status(conn, lead_id, "respondido")
         conn.commit()
     finally:
         conn.close()
@@ -103,6 +109,8 @@ def _lead_dict_crm(c, conta, email):
 
 
 def _classificar(texto):
+    if not ia.disponivel():
+        return None
     try:
         return ia.classify_reply(texto)
     except Exception:
@@ -150,20 +158,53 @@ def sync(conta):
     return {"ok": True, "novas": novos}
 
 
+_reclass_lock = threading.Lock()
+
+
+def _ha_pendentes():
+    c = store.crm()
+    try:
+        return bool(store.pendentes_de_classificar(c, 1))
+    finally:
+        c.close()
+
+
 def reclassificar():
+    """Classifica respostas pendentes. Um unico executor por vez (nunca classifica a mesma resposta duas vezes),
+    mas quem segura o bloqueio esvazia a fila inteira e, depois de solta-lo, confere de novo: uma resposta que
+    chega enquanto outra esta sendo classificada nunca fica esperando o proximo ciclo."""
+    total = 0
+    while True:
+        if not _reclass_lock.acquire(blocking=False):
+            return total                      # outro executor esta drenando a fila e vai pegar a nova resposta
+        try:
+            while True:
+                n = _reclassificar_lote()
+                total += n
+                if not n:
+                    break
+        finally:
+            _reclass_lock.release()
+        if not ia.disponivel() or not _ha_pendentes():
+            return total
+
+
+def _reclassificar_lote():
     c = store.crm()
     n = 0
-    for r in store.pendentes_de_classificar(c, 3):
-        res = _classificar(r["texto"] or "")
-        if res:
-            store.classificar_existente(c, r, res)
-            if r["lead_ref"].startswith("n"):
-                lead = store.get_lead(c, r["lead_ref"])
-                if lead:
-                    _nexora_apply(int(r["lead_ref"][1:]), lead["email"], res["categoria8"], res["classificacao"], r["texto"] or "")
-            n += 1
-    c.commit()
-    c.close()
+    try:
+        for r in store.pendentes_de_classificar(c, 3):
+            res = _classificar(r["texto"] or "")
+            if res:
+                store.classificar_existente(c, r, res)
+                if r["lead_ref"].startswith("n"):
+                    lead = store.get_lead(c, r["lead_ref"])
+                    if lead:
+                        _nexora_apply(int(r["lead_ref"][1:]), lead["email"], res["categoria8"], res["classificacao"], r["texto"] or "")
+                n += 1
+        c.commit()
+    finally:
+        c.close()
     return n
 
 
@@ -186,6 +227,10 @@ def _address(conta, at, env):
         return env["NEXORA_GMAIL_ADDRESS"]
     os.makedirs(ATLAS_DIR, exist_ok=True)
     p = os.path.join(ATLAS_DIR, "address.txt")
+    if os.path.exists(p):
+        cached = open(p, encoding="utf-8").read().strip()
+        if cached:
+            return cached
     addr = gmail_api.get_profile(at).get("emailAddress", "")
     with open(p, "w", encoding="utf-8") as f:
         f.write(addr)
@@ -239,6 +284,8 @@ def enviar_followups(conta):
                 c.execute("UPDATE tarefas SET status='cancelada' WHERE id=?", (t["id"],))
                 continue
             assunto = "Re: " + (lead.get("assunto") or lead.get("nota") or "my note")
+            if enviados:
+                time.sleep(DELAY_SECONDS)          # 45s entre envios (nao depois do ultimo)
             try:
                 gmail_api.send_message(at, _mime(conta, env, addr, t["email"], assunto, t["mensagem"]))
                 store.concluir_tarefa(c, t["id"], "auto_email", 1)
@@ -246,7 +293,6 @@ def enviar_followups(conta):
             except Exception as e:
                 c.execute("UPDATE tarefas SET status='erro', mensagem=mensagem || ? WHERE id=?", ("\n[erro de envio: %s]" % str(e)[:120], t["id"]))
             c.commit()
-            time.sleep(DELAY_SECONDS)
         return {"enviados": enviados}
     finally:
         c.commit()
@@ -269,6 +315,8 @@ def enviar_atlas_aprovados():
                 c.execute("UPDATE leads SET etapa='Perdido', updated_at=? WHERE id=?", (store.now(), r["id"]))
                 continue
             lead = dict(r, ref="c%d" % r["id"], id="c%d" % r["id"])
+            if enviados:
+                time.sleep(DELAY_SECONDS)
             try:
                 gmail_api.send_message(at, _mime("atlas", env, addr, r["email"], r["assunto"] or "Uma ideia para o seu site", r["mensagem"] or ""))
                 store.marcar_primeiro_envio(c, lead, "auto_email")
@@ -276,7 +324,6 @@ def enviar_atlas_aprovados():
             except Exception as e:
                 c.execute("UPDATE leads SET notas=COALESCE(notas,'') || ? WHERE id=?", ("\n[erro de envio: %s]" % str(e)[:120], r["id"]))
             c.commit()
-            time.sleep(DELAY_SECONDS)
         return {"enviados": enviados}
     finally:
         c.commit()

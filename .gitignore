@@ -20,3 +20,9 @@ server.out
 # demonstracao publicada na Vercel (gerada por demo/montar.py)
 demo/captacao-de-leads-demo/
 .vercel/
+
+# backups, logs e estado local
+backups/
+logs/
+wa-watcher/.linked
+*.corrompido-*

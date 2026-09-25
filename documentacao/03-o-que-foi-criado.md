@@ -12,7 +12,10 @@ Tamanho aproximado: 2.300 linhas de código na pasta `crm/`.
 | `gmail_ui.py` | Backend da tela estilo Gmail: pastas, conversas, leitura, envio, ações (excluir, arquivar, marcar lida, estrela) |
 | `ia.py` | Tudo que usa IA local (`claude -p`): classificar resposta e traduzir, analisar dor, escrever follow-up, captar leads, revisão semanal |
 | `pipeline.py` | Rotinas longas: captação, análise de dor, adaptação de follow-up, revisão semanal, inserção de leads captados sem duplicar |
-| `app.js`, `gmail.js`, `index.html`, `styles.css`, `mail.css` | Interface (JavaScript puro, sem framework) |
+| `index.html`, `css/app.css`, `js/*.js` (core, charts, v-painel, v-hoje, v-leads, v-radar, v-inbox, v-analise, v-config, main) | Interface (JavaScript puro, tema claro/escuro, mobile com barra inferior) |
+| `painel.py`, `painel_extra.py`, `nexora_ops.py`, `regras.py`, `wa.py`, `workers.py`, `backup.py` | Painel e series, radar/aprendizado/financeiro, aprovacao e envio Nexora, validador de copy, gerenciador do WhatsApp, workers, backup |
+| `instalar-inicializacao.ps1`, `remover-inicializacao.ps1` | Iniciar com o Windows (opcional, nao instalado por padrao) |
+| `tests/` | 131 testes automatizados (unidade, integracao, robustez, desempenho, navegador) |
 | `wa-watcher/wa-watcher.js` | Observador do WhatsApp Web, somente leitura (Node, biblioteca whatsapp-web.js) |
 | `atlas_gmail_auth.py` | Autoriza o Gmail da Atlas (quando existir) |
 | `gmail_upgrade_auth.py` | Reautoriza com permissão extra (gmail.modify) para excluir, arquivar e marcar como lida |

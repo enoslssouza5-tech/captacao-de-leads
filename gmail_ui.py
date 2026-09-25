@@ -188,7 +188,29 @@ def enviar(conta, para, assunto, corpo, thread_id=None, in_reply_to=None, refere
     corpo_req = {"raw": base64.urlsafe_b64encode(m.as_bytes()).decode("ascii")}
     if thread_id:
         corpo_req["threadId"] = thread_id
-    return _post(at, "/messages/send", corpo_req)
+    r = _post(at, "/messages/send", corpo_req)
+    _registrar_resposta_manual(conta, para)
+    return r
+
+
+def _registrar_resposta_manual(conta, para):
+    """Uma resposta enviada pelo usuario a um lead zera 'aguardando voce' e conta no teto diario de e-mails."""
+    email = (parseaddr(para or "")[1] or "").lower()
+    if not email:
+        return
+    c = store.crm()
+    try:
+        lead = None
+        if conta == "nexora":
+            lead = next((l for l in store.nexora_leads() if (l.get("email") or "").lower() == email), None)
+        if not lead:
+            r = c.execute("SELECT * FROM leads WHERE conta=? AND lower(email)=?", (conta, email)).fetchone()
+            lead = dict(r, ref="c%d" % r["id"], conta=conta, canal="email") if r else None
+        if lead:
+            store.registrar_envio(c, dict(lead, conta=conta, canal="email"), 99, "resposta_manual")
+            c.commit()
+    finally:
+        c.close()
 
 
 ACOES = {

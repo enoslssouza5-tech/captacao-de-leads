@@ -99,6 +99,105 @@ async function ir(page, hash) { await page.evaluate((h) => { location.hash = h; 
     return true;
   });
   await page.keyboard.press("Escape");
+
+  // ================= evolucao: detalhes do lead, kanban por arrastar, traducao =================
+  const crit = { criterios: [{ criterio: "captacao fora do horario", achado: "Contato so por ligacao no telefone fixo, sem WhatsApp.", impacto: "alto" },
+    { criterio: "reputacao_e_presenca", achado: "84 avaliacoes com nota 4,8 e nenhum formulario.", impacto: "medio" }],
+    evidencias: [{ fato: "84 avaliacoes no Google com nota 4,8", fonte: "https://www.google.com/maps/place/x" }, "telefone disponivel apenas para ligacao", { fato: "ausencia de formulario de contato", fonte: "https://locadora-detalhe.example.com" }] };
+  const semear = async (nome, tel, etapa, extra) => { const r = await api("/api/leads", Object.assign({ conta: "atlas", canal: "whatsapp", nome, telefone: tel, etapa, mensagem: "Me chamo Enos." }, extra || {})); return "c" + r.id; };
+  const ID = {};
+  ID.det = await semear("Locadora Detalhe", "+55 753 199 77 44", "Pronto", { avaliacoes: 84, nota_google: 4.8, dor: "Contato apenas por ligacao no telefone fixo, sem WhatsApp, para quem pesquisa fora do horario.",
+    notas: "Telefone fixo: sem WhatsApp, contato so por ligacao\nAbordagem reprovada nas regras e NAO sera enviada. Motivo: frases demais: 6 (maximo 4)" });
+  await api(`/api/leads/${ID.det.slice(1)}/editar`, { criterios_json: crit });
+  ID.a = await semear("Kanban A", "(77) 99000-0001", "Pronto");
+  ID.b = await semear("Kanban B", "(77) 99000-0002", "Pronto");
+  ID.bloq = await semear("Kanban Bloqueado", "(77) 99000-0003", "Contatado");
+  await api(`/api/leads/${ID.bloq.slice(1)}/resposta`, { texto: "nao tenho interesse, pare de enviar", classificacao: "recusou" });
+  const abrirDetalhe = async (pg, ref) => { await pg.evaluate((r) => abrirLead(r), ref); await pg.locator(".drawer .tab").first().waitFor(); await pg.waitForTimeout(500); };
+
+  await checa("Detalhe do lead: sem [object] nem JSON cru; dor, critérios e evidências em linguagem humana", async () => {
+    await ir(page, "#/atlas/leads");
+    await abrirDetalhe(page, ID.det);
+    const t = await texto(page, ".drawer");
+    DIAG = t.replace(/\s+/g, " ").slice(0, 400);
+    return !/\[object|\{"|"fato"|"fonte"|https?:\/\//.test(t) && /Dor principal/.test(t) && /Critérios analisados/.test(t) && /Captacao fora do horario/.test(t) && !/reputacao_e_presenca/.test(t)
+      && /Evidências/.test(t) && /84 avaliacoes no Google com nota 4,8/.test(t) && /google\.com/.test(t) && /ausencia de formulario de contato/.test(t);
+  });
+  await checa("Detalhe do lead: telefone formatado, círculo de oportunidade com número e aviso de abordagem reprovada", async () => {
+    const t = await texto(page, ".drawer");
+    const anel = (await page.locator(".drawer .ring b").first().innerText()).trim();
+    return /\(75\) 3199-7744/.test(t) && !/\+55 753/.test(t) && /^\d+$/.test(anel) && /OPORTUNIDADE/.test(t) && /Abordagem reprovada, não será enviada/.test(t) && /frases demais/.test(t);
+  });
+  await checa("Detalhe do lead: não há seletor de etapa", async () => (await page.locator(".drawer select").count()) === 0 && !/Mover para/.test(await texto(page, ".drawer")));
+  await page.keyboard.press("Escape");
+
+  const colDe = (pg, etapa) => pg.locator(`.col[data-etapa="${etapa}"]`);
+  await ir(page, "#/atlas/leads");
+  await checa("Kanban desktop: não existe seletor de etapa", async () => (await page.locator("#view select").count()) === 0);
+  await checa("Kanban: arrastar Pronto para Contatado persiste, cria D+3, D+7, D+14 e registra atividade", async () => {
+    await page.locator(".kc", { hasText: "Kanban A" }).dragTo(colDe(page, "Contatado").locator(".cards"));
+    await page.waitForTimeout(900);
+    const lead = (await api(`/api/lead?ref=${ID.a}`));
+    DIAG = "etapa=" + lead.lead.etapa + " tarefas=" + lead.tarefas.length;
+    const noQuadro = await colDe(page, "Contatado").locator(".kc", { hasText: "Kanban A" }).count();
+    return lead.lead.etapa === "Contatado" && lead.tarefas.length === 3 && noQuadro === 1 && lead.eventos.some((e) => e.tipo === "manual");
+  });
+  await checa("Kanban: movimento que quebra a regra é recusado com aviso humano e o card fica onde estava", async () => {
+    await page.locator(".kc", { hasText: "Kanban Bloqueado" }).dragTo(colDe(page, "Negociando").locator(".cards"));
+    await page.waitForTimeout(700);
+    const aviso = await page.locator(".toast").allInnerTexts();
+    const lead = await api(`/api/lead?ref=${ID.bloq}`);
+    DIAG = aviso.join(" | ") + " etapa=" + lead.lead.etapa;
+    return lead.lead.etapa === "Perdido" && aviso.some((t) => /bloqueado/i.test(t)) && (await colDe(page, "Perdido").locator(".kc", { hasText: "Kanban Bloqueado" }).count()) === 1;
+  });
+  await checa("Kanban: arrastar sem regra quebrada atualiza a tela (Contatado para Negociando)", async () => {
+    await page.waitForFunction(() => !document.body.classList.contains("carregando")); await page.waitForTimeout(1200);
+    await page.evaluate(() => {
+      const dt = new DataTransfer();
+      const card = [...document.querySelectorAll(".kc")].find((x) => x.textContent.includes("Kanban A"));
+      card.dispatchEvent(new DragEvent("dragstart", { dataTransfer: dt, bubbles: true }));
+      const alvo = document.querySelector('.col[data-etapa="Negociando"]');
+      alvo.dispatchEvent(new DragEvent("dragover", { dataTransfer: dt, bubbles: true, cancelable: true }));
+      alvo.dispatchEvent(new DragEvent("drop", { dataTransfer: dt, bubbles: true, cancelable: true }));
+    });
+    await page.waitForTimeout(1200);
+    const et =(await api(`/api/lead?ref=${ID.a}`)).lead.etapa;
+    DIAG = "etapa=" + et + " toasts=" + (await page.locator(".toast").allInnerTexts()).join("|") + " naColuna=" + (await colDe(page, "Negociando").locator(".kc", { hasText: "Kanban A" }).count());
+    return et === "Negociando" && (await colDe(page, "Negociando").locator(".kc", { hasText: "Kanban A" }).count()) === 1;
+  });
+
+  // --- tradução (Nexora): só para compreensão; original nunca é substituído ---
+  const nx = await api("/api/leads", { conta: "nexora", canal: "whatsapp", nome: "Lead Nexora E2E", telefone: "(512) 555-0142", etapa: "Contatado", mensagem: "Hi there" });
+  const nxRef = "c" + nx.id;
+  await api("/api/wa/event", { direcao: "entrada", telefone: "5125550142", texto: "Hi, I'm interested. Can you send more details about the landing page?", tipo: "chat", ts: 1700000000 });
+  await page.route("**/api/traduzir", async (rota) => {
+    const corpo = JSON.parse(rota.request().postData());
+    const trad = corpo.para === "pt" ? "Oi, tenho interesse. Pode enviar mais detalhes sobre a landing page?" : "Of course, I'd be happy to discuss this with you tomorrow.";
+    await rota.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ traducao: trad, cache: false, de: corpo.de, para: corpo.para }) });
+  });
+  await checa("Tradução na conversa do WhatsApp da Nexora: botão Traduzir mostra caixa separada e mantém o original", async () => {
+    await ir(page, `#/nexora/inbox/whatsapp/${nxRef}`);
+    await page.locator(".bolha .trad-b").first().click();
+    await page.waitForTimeout(400);
+    const t = await texto(page, ".thread");
+    DIAG = t.replace(/\s+/g, " ").slice(0, 300);
+    return /Hi, I'm interested/.test(t) && /TRADUÇÃO PARA O PORTUGUÊS/.test(t) && /Oi, tenho interesse/.test(t);
+  });
+  await checa("Nexora: escrever em português, preparar em inglês e ver 'IDIOMA DO ENVIO: INGLÊS'", async () => {
+    const t0 = await texto(page);
+    if (!/IDIOMA DO ENVIO: INGLÊS/.test(t0)) return false;
+    await page.locator('textarea[aria-label="Rascunho em português"]').fill("Claro, podemos conversar amanhã.");
+    await page.getByRole("button", { name: /Preparar em inglês/ }).click();
+    await page.waitForTimeout(500);
+    const en = await page.locator('textarea[aria-label="Resposta em inglês"]').inputValue();
+    DIAG = en;
+    return /I'd be happy to discuss/.test(en);
+  });
+  await checa("Atlas não mostra botão de tradução (só a Nexora trabalha em inglês)", async () => {
+    await ir(page, "#/atlas/inbox/whatsapp");
+    return (await page.locator(".trad-b").count()) === 0;
+  });
+  await page.unroute("**/api/traduzir");
   await checa("Esc fecha a gaveta", async () => (await page.locator(".drawer").count()) === 0);
 
   // --- Nexora e aprovação de e-mail (lead de e-mail da Atlas) ---
@@ -205,6 +304,28 @@ async function ir(page, hash) { await page.evaluate((h) => { location.hash = h; 
     await ir(m, "#/atlas/hoje");
     const baixos = await m.evaluate(() => [...document.querySelectorAll("#view button, #view a.btn")].filter((b) => b.getBoundingClientRect().height > 0 && b.getBoundingClientRect().height < 34).length);
     return baixos === 0;
+  });
+
+  await checa("Celular: Kanban sem seletor; botão Mover abre folha com etapas e move o lead", async () => {
+    await ir(m, "#/atlas/leads");
+    if ((await m.locator("#view select").count()) !== 0) return false;
+    const card = m.locator(".kc", { hasText: "Kanban B" }).first();
+    await card.locator(".so-toque").click();
+    await m.locator(".sheet").waitFor();
+    const opcoes = await m.locator(".sheet button").allInnerTexts();
+    DIAG = opcoes.join(",");
+    if (opcoes.length !== 7) return false;
+    await m.locator(".sheet button", { hasText: /^Contatado/ }).click();
+    await m.waitForTimeout(900);
+    const l = await api(`/api/lead?ref=${ID.b}`);
+    return l.lead.etapa === "Contatado" && l.tarefas.length === 3;
+  });
+  await checa("Celular: gaveta do lead sem [object], sem overflow", async () => {
+    await abrirDetalhe(m, ID.det);
+    const t = await texto(m, ".drawer");
+    const overflow = await m.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 1);
+    await m.keyboard.press("Escape");
+    return !/\[object|\{"/.test(t) && /Dor principal/.test(t) && !overflow;
   });
   await browser.close();
   console.log(JSON.stringify(R));

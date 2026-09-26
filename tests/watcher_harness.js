@@ -37,6 +37,17 @@ const post = async (rota, corpo) => {
   cliente.emit("message", { fromMe: false, isStatus: true, from: "status@broadcast", body: "status", type: "chat", timestamp: 1700000500 });         // status: ignorado
   cliente.emit("message_create", { fromMe: true, isStatus: false, to: "12036300000@g.us", body: "grupo", type: "chat", timestamp: 1700000600 });     // grupo: ignorado
   await esperar();
+  // WhatsApp atual: contato identificado por @lid (id interno), nao pelo telefone
+  cliente.getContactLidAndPhone = async (ids) => ids.map((id) => (id === "98765432100@lid" ? { lid: id, pn: alvo + "@c.us" } : { lid: id, pn: undefined }));
+  cliente.emit("message_create", { fromMe: true, isStatus: false, to: "98765432100@lid", body: "enviada via lid", type: "chat", timestamp: 1700000700 });
+  await esperar();
+  cliente.emit("message", { fromMe: false, isStatus: false, from: "98765432100@lid", body: "resposta via lid", type: "chat", timestamp: 1700000800 });
+  await esperar();
+  cliente.emit("message_create", { fromMe: true, isStatus: false, to: "55555555555@lid", body: "lid sem resolucao", type: "chat", timestamp: 1700000900,
+    getContact: async () => ({ number: alvo }) });                                    // cai no getContact
+  await esperar();
+  cliente.emit("message_create", { fromMe: true, isStatus: false, to: "77777777777@lid", body: "lid impossivel", type: "chat", timestamp: 1700001000 });
+  await esperar();
   cliente.emit("disconnected", "LOGOUT");
   await esperar();
   obs.parar();

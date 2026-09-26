@@ -1,7 +1,9 @@
 """IA local do CRM via `claude -p` (sem API paga). Todas as funcoes devolvem dados estruturados
 ou levantam RuntimeError; quem chama decide o fallback."""
+import hashlib
 import json
 import os
+import sqlite3
 import subprocess
 import time
 
@@ -20,14 +22,17 @@ CAT_MAP = {"positive": "interessado", "question": "duvida", "neutral": "pendente
 REGRAS_ATLAS = (
     "Regras de escrita da Atlas (obrigatorias): portugues do Brasil, humano, direto, especifico. NUNCA use travessao nem hifen (nada de '-', '—' ou '–'; "
     "escreva 'email' e nao 'e-mail'). Apresente-se como 'me chamo Enos' (nunca 'aqui e o Enos'). Sem linguagem robotica ('espero que esteja bem', 'gostaria de me apresentar', "
-    "'solucoes completas'). Nunca cite Vitoria da Conquista. Nunca invente numero, avaliacao, prova, resultado ou percentual. Nunca diga que ja existe site, previa ou modelo pronto "
+    "'solucoes completas'). Nada de 'solucoes personalizadas', 'estrategias inovadoras', lista de servicos ou apresentacao institucional. Nunca invente numero, avaliacao, prova, resultado ou percentual. Nunca diga que ja existe site, previa ou modelo pronto "
     "para a empresa. So use fatos comprovados pelos dados fornecidos."
 )
 ESTRUTURA_PRIMEIRA = (
-    "A primeira mensagem tem que ser lida em poucos segundos: no maximo 4 frases curtas e 300 caracteres. Estrutura obrigatoria: (1) observacao especifica e verdadeira sobre a empresa, "
-    "(2) a consequencia em uma frase, (3) proposta simples, (4) pergunta curta como CTA. Nao explique a empresa toda, nao liste varios problemas, nao abra com introducao artificial. "
-    "Exemplo so da ESTRUTURA (nao copie o texto): 'Oi, me chamo Enos. Vi que voces tem bastante avaliacao no Google, mas hoje nao tem uma pagina propria para transformar essa procura em orcamento. "
-    "Eu trabalho justamente essa parte. Posso te mostrar uma ideia rapida?'"
+    "A primeira mensagem de WhatsApp tem no máximo 3 parágrafos curtos e 380 caracteres no total, escrita como uma pessoa escreveria, com acentuação correta do português. "
+    "Estrutura obrigatória: (1) apresentação em uma frase: 'Me chamo Enos, falo de Vitória da Conquista, na Bahia.'; "
+    "(2) o que eu faço e a DOR específica achada na análise deste lead, numa única frase de até 200 caracteres; "
+    "(3) CTA simples em pergunta. Só a dor muda de lead para lead. Modelo da estrutura (adapte só o que precisa, não copie a dor): "
+    "'Me chamo Enos, falo de Vitória da Conquista, na Bahia.\n\nEu ajudo empresas de locação a receberem mais pedidos pela internet com tráfego pago, especialmente quando [dor concreta deste lead, curta].\n\n"
+    "Ficaria ruim se agendarmos um horário essa semana para eu te apresentar um projeto?' "
+    "Proibido: lista de serviços, apresentação institucional, mais de uma dor, elogio vazio, emoji, frase longa com várias vírgulas."
 )
 
 
@@ -105,9 +110,53 @@ def classify_reply(texto: str) -> dict:
     return {"categoria8": cat, "classificacao": cls, "traducao": d.get("traducao_pt") or "", "resumo": d.get("resumo") or ""}
 
 
-def _corrigir(conta, canal, tipo, texto, fatos, tentativas=2, link=False):
+IDIOMAS = {"en": "American English", "pt": "Brazilian Portuguese"}
+_TRAD_DB = os.environ.get("CRM_TRADUCOES", os.path.join(HERE, "traducoes.sqlite3"))
+
+
+def _trad_cache(chave, valor=None):
+    conn = sqlite3.connect(_TRAD_DB, timeout=10)
+    try:
+        conn.execute("CREATE TABLE IF NOT EXISTS traducoes (chave TEXT PRIMARY KEY, texto TEXT NOT NULL, criado_em REAL)")
+        if valor is None:
+            r = conn.execute("SELECT texto FROM traducoes WHERE chave=?", (chave,)).fetchone()
+            return r[0] if r else None
+        conn.execute("INSERT OR REPLACE INTO traducoes (chave, texto, criado_em) VALUES (?,?,?)", (chave, valor, time.time()))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def translate_text(texto: str, origem: str, destino: str) -> dict:
+    """Traduz `texto` de `origem` para `destino` ("en" ou "pt") com a IA local (claude -p). Cache em disco.
+    A traducao e so para COMPREENSAO (en->pt) ou para PREPARAR a resposta (pt->en): quem chama nunca envia o resultado sozinho.
+    Devolve {"traducao", "cache"}. Levanta RuntimeError se a IA estiver indisponivel."""
+    texto = (texto or "").strip()
+    if origem not in IDIOMAS or destino not in IDIOMAS:
+        raise ValueError("idioma invalido")
+    if not texto:
+        return {"traducao": "", "cache": True}
+    if origem == destino:
+        return {"traducao": texto, "cache": True}
+    chave = hashlib.sha256(("%s>%s|%s" % (origem, destino, texto)).encode("utf-8")).hexdigest()
+    achado = _trad_cache(chave)
+    if achado is not None:
+        return {"traducao": achado, "cache": True}
+    if not disponivel():
+        raise RuntimeError("a IA local esta indisponivel no momento; tente de novo em alguns instantes")
+    prompt = ("Translate the text below from %s to %s. Output ONLY the translation, nothing else: no quotes, no notes, no explanation. "
+              "Keep names, company names, e-mail addresses, URLs, phone numbers and numbers exactly as they are. Keep the paragraph breaks and a natural, polite tone. "
+              "Do not add or remove information.\n\nTEXT:\n" % (IDIOMAS[origem], IDIOMAS[destino])) + texto[:6000]
+    saida = run_claude(prompt, timeout=120).strip().strip('"')
+    if not saida:
+        raise RuntimeError("a traducao veio vazia")
+    _trad_cache(chave, saida)
+    return {"traducao": saida, "cache": False}
+
+
+def _corrigir(conta, canal, tipo, texto, fatos, tentativas=2, link=False, recentes=None):
     """Valida com o validador deterministico e pede reescrita a IA ate `tentativas` vezes. Devolve (texto, violacoes)."""
-    viol = regras.validar(conta, canal, tipo, texto, fatos, link)
+    viol = regras.validar(conta, canal, tipo, texto, fatos, link, recentes)
     n = 0
     while viol and n < tentativas:
         prompt = ("Reescreva a mensagem abaixo corrigindo EXATAMENTE estes problemas: " + regras.resumo(viol) + ". Mantenha somente fatos verdadeiros dos dados comprovados. "
@@ -116,12 +165,12 @@ def _corrigir(conta, canal, tipo, texto, fatos, tentativas=2, link=False):
                   + "\nMensagem atual: " + str(texto) + "\nDados comprovados: " + json.dumps(fatos, ensure_ascii=False)[:1500]
                   + "\nResponda SOMENTE com a mensagem corrigida.")
         texto = run_claude(prompt, timeout=120).strip().strip('"')
-        viol = regras.validar(conta, canal, tipo, texto, fatos, link)
+        viol = regras.validar(conta, canal, tipo, texto, fatos, link, recentes)
         n += 1
     return texto, viol
 
 
-def analyze_lead(lead: dict) -> dict:
+def analyze_lead(lead: dict, recentes=None) -> dict:
     """Analise profunda da dor (com web) + primeira mensagem de WhatsApp e de email, ja validadas pelas regras."""
     prompt = (
         "Voce e analista comercial da Atlas (landing pages premium e gestao de trafego pago). Faca uma ANALISE PROFUNDA do lead abaixo, "
@@ -135,17 +184,34 @@ def analyze_lead(lead: dict) -> dict:
         '\nResponda SOMENTE um JSON com: "dor" (uma frase com a dor principal e o dado que a prova), "criterios" (lista de objetos '
         '{"criterio","achado","impacto"} com impacto alto/medio/baixo), "evidencias" (lista de fatos verificados, cada um com a fonte), "tipo_dor" (rotulo curto: '
         'sem_site, site_desatualizado, site_confuso, sem_conversao, reputacao_sem_captacao, anuncio_sem_pagina, concorrente_a_frente ou outro), '
-        '"mensagem" (primeira mensagem de WhatsApp na estrutura acima), "assunto" (assunto curto de email) e "email" (primeiro email, ate 5 frases, mesma abertura).'
+        '"mensagem" (primeira mensagem de WhatsApp na estrutura acima, 3 paragrafos curtos), "assunto" (assunto curto de email) e "email" (primeiro email, ate 5 frases, mesma abertura).'
     )
     d = extract_json(run_claude(prompt, tools=["WebFetch", "WebSearch"], timeout=420))
-    fatos = {"lead": {k: lead.get(k) for k in ("avaliacoes", "nota_google")}, "evidencias": d.get("evidencias"), "criterios": d.get("criterios")}
+    fatos = {"lead": {k: lead.get(k) for k in ("avaliacoes", "nota_google")}, "evidencias": d.get("evidencias"), "criterios": d.get("criterios"), "dor": d.get("dor")}
     d["violacoes"] = {}
     for campo, canal in (("mensagem", "whatsapp"), ("email", "email")):
-        texto, viol = _corrigir("atlas", canal, "primeiro", d.get(campo), fatos)
+        texto, viol = _corrigir("atlas", canal, "primeiro", d.get(campo), fatos, recentes=recentes)
         d[campo] = texto
         if viol:
             d["violacoes"][campo] = viol
     return d
+
+
+def reescrever_abordagem(lead: dict, recentes=None):
+    """Reescreve a primeira mensagem de WhatsApp da Atlas no modelo curto, usando SOMENTE a dor e as evidencias ja analisadas (sem nova pesquisa).
+    Devolve (texto, violacoes). Com violacoes, quem chama nao deve enviar."""
+    try:
+        j = json.loads(lead.get("criterios_json") or "{}")
+    except ValueError:
+        j = {}
+    fatos = {"lead": {k: lead.get(k) for k in ("avaliacoes", "nota_google")}, "evidencias": j.get("evidencias"), "criterios": j.get("criterios"), "dor": lead.get("dor")}
+    prompt = ("Escreva a primeira mensagem de WhatsApp da Atlas para este lead. " + REGRAS_ATLAS + "\n" + ESTRUTURA_PRIMEIRA +
+              "\nA dor abaixo veio da analise real do lead; use so ela, encurtada em UMA frase natural, e so os numeros que estao nos dados.\n"
+              "Empresa: " + str(lead.get("nome")) + "\nDor: " + str(lead.get("dor")) + "\nDados comprovados: " + json.dumps(fatos, ensure_ascii=False)[:1800] +
+              "\nResponda SOMENTE com a mensagem, com uma linha em branco entre os paragrafos.")
+    texto = run_claude(prompt, timeout=150).strip().strip('"')
+    texto, viol = _corrigir("atlas", "whatsapp", "primeiro", texto, fatos, recentes=recentes)
+    return texto.replace("Vitoria da Conquista", "Vitória da Conquista"), viol
 
 
 def generate_followup(lead: dict, passo: int, canal: str, conta: str, historico: str) -> str:

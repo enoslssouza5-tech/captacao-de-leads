@@ -182,6 +182,7 @@ def enviar(conta, para, assunto, corpo, thread_id=None, in_reply_to=None, refere
     m = MIMEText(corpo, "plain", "utf-8")
     nome = env.get("NEXORA_SENDER_NAME", "Nexora") if conta == "nexora" else "Enos | Atlas"
     m["Subject"], m["From"], m["To"] = assunto, "%s <%s>" % (nome, endereco), para
+    m["X-CRM-Origem"] = "crm"
     if in_reply_to:
         m["In-Reply-To"] = in_reply_to
         m["References"] = ((references or "") + " " + in_reply_to).strip()

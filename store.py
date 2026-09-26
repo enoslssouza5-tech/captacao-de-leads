@@ -207,6 +207,22 @@ def wa_link(tel, msg):
     return "https://wa.me/%s?text=%s" % (d, quote(msg or "")) if d else ""
 
 
+def _dor_nexora(findings_json):
+    """Achados auditados da Nexora viram dor, criterios e evidencias do lead (so o que esta no banco, nada inventado)."""
+    try:
+        fs = [f for f in json.loads(findings_json or "[]") if isinstance(f, dict)]
+    except ValueError:
+        return {}
+    if not fs:
+        return {}
+    fs.sort(key=lambda f: {"alta": 0, "media": 1}.get(f.get("confianca"), 2))
+    return {"dor": " ".join(x for x in (fs[0].get("problema"), fs[0].get("impacto")) if x),
+            "criterios_json": json.dumps({
+                "criterios": [{"criterio": f.get("elemento") or f.get("pagina") or "", "impacto": f.get("tipo") or "",
+                               "achado": " ".join(x for x in (f.get("problema"), f.get("impacto")) if x)} for f in fs],
+                "evidencias": [f["evidencia_textual"] for f in fs if f.get("evidencia_textual")]}, ensure_ascii=False)}
+
+
 def get_lead(c, ref):
     if ref.startswith("n"):
         for l in nexora_leads():
@@ -214,9 +230,9 @@ def get_lead(c, ref):
                 n = nexora_ro()
                 if n:
                     try:
-                        r = n.execute("SELECT corpo_texto, selected_subject, assunto FROM leads WHERE id=?", (int(ref[1:]),)).fetchone()
+                        r = n.execute("SELECT corpo_texto, selected_subject, assunto, findings_json FROM leads WHERE id=?", (int(ref[1:]),)).fetchone()
                         if r:
-                            l = dict(l, corpo_texto=r["corpo_texto"], assunto=r["selected_subject"] or r["assunto"])
+                            l = dict(l, corpo_texto=r["corpo_texto"], assunto=r["selected_subject"] or r["assunto"], **_dor_nexora(r["findings_json"]))
                     finally:
                         n.close()
                 return l
@@ -302,16 +318,16 @@ def sync_nexora_followups(c):
     c.commit()
 
 
-def registrar_envio(c, lead, passo, origem):
+def registrar_envio(c, lead, passo, origem, ts=None):
     c.execute("INSERT INTO envios (lead_ref,conta,canal,passo,tipo_dor,enviado_em,origem) VALUES (?,?,?,?,?,?,?)",
-              (lead["ref"], lead["conta"], lead["canal"], passo, lead.get("tipo_dor"), now(), origem))
+              (lead["ref"], lead["conta"], lead["canal"], passo, lead.get("tipo_dor"), ts or now(), origem))
 
 
-def marcar_primeiro_envio(c, lead, origem):
+def marcar_primeiro_envio(c, lead, origem, ts=None):
     if lead["etapa"] not in ("Novo", "Pronto"):
         return False
     lid = int(lead["ref"][1:])
-    c.execute("UPDATE leads SET etapa='Contatado', sent_at=?, updated_at=? WHERE id=?", (now(), now(), lid))
+    c.execute("UPDATE leads SET etapa='Contatado', sent_at=?, updated_at=? WHERE id=?", (ts or now(), now(), lid))
     lead = dict(lead, etapa="Contatado")
     criar_followups(c, lead)
     registrar_envio(c, lead, 0, origem)
@@ -389,6 +405,57 @@ def _pode_mover_para(nova):
     if nova == "Negociando":
         return ["Novo", "Pronto", "Contatado", "Respondeu"]
     return ["Novo", "Pronto", "Contatado"]
+
+
+ORDEM_ETAPA = {e: i for i, e in enumerate(ETAPAS)}
+
+
+def lead_bloqueado(c, lead):
+    """True se o telefone ou e-mail do lead esta em bloqueios (recusa, bounce ou descadastro)."""
+    for chave in (lead.get("telefone"), lead.get("email")):
+        if chave and c.execute("SELECT 1 FROM bloqueios WHERE conta=? AND chave=?", (lead["conta"], chave)).fetchone():
+            return True
+    return False
+
+
+def mover_manual(c, ref, etapa):
+    """Movimento feito por arrastar o card. Mantem as regras do funil: devolve {"ok": True} ou {"ok": False, "erro": frase humana}.
+    Protecoes: lead que recusou/bounce/descadastrou nunca sai de Perdido; Fechado e definitivo; quem ja foi contatado nao volta a Novo/Pronto;
+    quem ja respondeu nao volta a Contatado; Pronto exige abordagem valida; Contatado (primeiro envio) cria D+3, D+7 e D+14."""
+    if etapa not in ETAPAS:
+        return {"ok": False, "erro": "Etapa invalida."}
+    if not ref.startswith("c"):
+        return {"ok": False, "erro": "Este lead e da Nexora: use a rota da Nexora."}
+    row = c.execute("SELECT * FROM leads WHERE id=?", (int(ref[1:]),)).fetchone()
+    if not row:
+        return {"ok": False, "erro": "Lead nao encontrado."}
+    lead = dict(row, ref=ref, id=ref)
+    atual = lead["etapa"]
+    if atual == etapa:
+        return {"ok": True, "igual": True}
+    if etapa != "Perdido" and lead_bloqueado(c, lead):
+        return {"ok": False, "erro": "Este contato recusou ou esta bloqueado. Ele fica em Perdido para nunca receber nova mensagem."}
+    if atual == "Fechado":
+        return {"ok": False, "erro": "Lead fechado nao volta para o funil."}
+    if etapa in ("Novo", "Pronto") and ORDEM_ETAPA[atual] >= ORDEM_ETAPA["Contatado"] and atual != "Perdido":
+        return {"ok": False, "erro": "Este lead ja foi contatado ou respondeu. Ele nao volta para %s." % etapa}
+    if etapa == "Contatado" and ORDEM_ETAPA[atual] >= ORDEM_ETAPA["Respondeu"] and atual != "Perdido":
+        return {"ok": False, "erro": "Este lead ja respondeu. Ele nao volta para Contatado."}
+    if etapa == "Pronto" and not (lead.get("mensagem") or "").strip():
+        return {"ok": False, "erro": "Sem abordagem aprovada nas regras. Analise o lead primeiro ou reescreva a mensagem."}
+    if etapa in ("Novo", "Pronto") and atual == "Perdido":
+        return {"ok": False, "erro": "Reabra um lead perdido em Contatado, Respondeu ou Negociando."}
+    if etapa == "Contatado" and atual in ("Novo", "Pronto"):
+        marcar_primeiro_envio(c, lead, "manual_kanban")
+    else:
+        c.execute("UPDATE leads SET etapa=?, updated_at=? WHERE id=?", (etapa, now(), int(ref[1:])))
+        if etapa in ("Respondeu", "Negociando", "Fechado", "Perdido"):
+            cancelar_tarefas(c, ref)
+        elif etapa == "Contatado" and atual == "Perdido" and not c.execute("SELECT 1 FROM tarefas WHERE lead_ref=?", (ref,)).fetchone():
+            criar_followups(c, dict(lead, etapa="Contatado"))
+    c.execute("INSERT INTO eventos (lead_ref, conta, canal, tipo, de_etapa, para_etapa, ts) VALUES (?,?,?,?,?,?,?)",
+              (ref, lead["conta"], lead["canal"], "manual", atual, etapa, now()))
+    return {"ok": True, "de": atual, "para": etapa}
 
 
 def registrar_resposta_efeito(c, lead, cls):

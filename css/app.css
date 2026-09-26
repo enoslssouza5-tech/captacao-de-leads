@@ -96,6 +96,7 @@ textarea{resize:vertical;min-height:88px;line-height:1.5}
 label{display:block;font-size:12px;color:var(--tx3);margin:12px 0 5px;font-weight:550}
 .note{padding:10px 14px;border-radius:9px;background:var(--warn-s);color:var(--warn);font-size:13px;margin-bottom:18px}
 .note.info{background:var(--info-s);color:var(--info)}
+.note.err{background:var(--err-s,rgba(220,80,60,.12));color:var(--err)}
 .sec{margin-top:40px}
 .sec-h{display:flex;align-items:baseline;gap:12px;margin-bottom:14px}
 .sec-h h2{margin:0;font-size:14px;font-weight:620;letter-spacing:-.005em}
@@ -309,3 +310,18 @@ body.carregando .top::after{content:"";position:absolute;left:0;right:0;top:0;he
 @media (max-width:820px){.sw{flex-wrap:wrap}.sw .d{min-width:60%}}
 /* .sec (secao) e .btn.sec (botao secundario) compartilham o nome: o botao nunca herda a margem de secao */
 .btn.sec{margin:0}
+
+/* Kanban: arrastar e soltar */
+.kc.arrastado{opacity:.35;transform:scale(.97)}
+.board.arrastando .col .cards{min-height:96px;border-radius:10px;background:var(--hover);transition:background .12s}
+.board.arrastando .col.over .cards{background:var(--ac-soft);outline:2px dashed var(--ac);outline-offset:3px}
+.kc .so-toque{display:none;margin-top:8px;min-height:38px}
+@media (pointer:coarse),(max-width:820px){.kc .so-toque{display:inline-flex}.kc[draggable=true]{cursor:pointer}}
+
+/* Traducao: sempre separada do original */
+.trad-wrap{margin-top:6px}
+.trad-b{min-height:30px;padding:2px 8px;font-size:12.5px}
+.trad{border-left:2px solid var(--info);background:var(--info-s);padding:9px 12px;border-radius:8px;font-size:13.5px;margin-top:6px;line-height:1.5;color:var(--tx)}
+.trad .rot{display:block;font-size:10.5px;letter-spacing:.06em;color:var(--info);margin-bottom:3px;font-weight:600}
+.idioma-envio{font-size:11px;letter-spacing:.07em;font-weight:650;color:var(--ac-tx);border:1px solid var(--ac);border-radius:6px;padding:3px 8px}
+.comp-en textarea{width:100%}

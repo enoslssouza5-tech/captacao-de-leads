@@ -158,6 +158,80 @@ def sync(conta):
     return {"ok": True, "novas": novos}
 
 
+def _iso_da_mensagem(msg):
+    from datetime import datetime, timezone
+    try:
+        return datetime.fromtimestamp(int(msg.get("internalDate", 0)) / 1000, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    except (ValueError, OSError):
+        return store.now()
+
+
+def sync_enviados(conta, dias_max=3):
+    """Equivalente do observador do WhatsApp: detecta e-mails que VOCE enviou pelo Gmail (site ou celular) a um lead.
+    Primeiro contato: lead vai a Contatado e cria D+3, D+7 e D+14. Depois: conclui o follow-up devido ou registra a conversa.
+    Mensagens enviadas pelo proprio CRM (cabecalho X-CRM-Origem) sao ignoradas; so olha os ultimos `dias_max` dias."""
+    from datetime import datetime, timedelta, timezone
+    at, env = access(conta)
+    if not at:
+        return {"ok": False, "motivo": "conta Gmail nao configurada"}
+    c = store.crm()
+    limite = datetime.now(timezone.utc) - timedelta(days=dias_max)
+    vistos = {r[0] for r in c.execute("SELECT message_id FROM gmail_vistos WHERE conta=?", (conta,))}
+    detectados = 0
+    try:
+        for mid in gmail_api.list_inbox_message_ids(at, "in:sent", 40):
+            if mid in vistos:
+                continue
+            msg = gmail_api.get_message(at, mid)
+            c.execute("INSERT OR IGNORE INTO gmail_vistos (conta, message_id) VALUES (?,?)", (conta, mid))
+            ts = _iso_da_mensagem(msg)
+            if gmail_api.header(msg, "X-CRM-Origem") or datetime.fromisoformat(ts.replace("Z", "+00:00")) < limite:
+                continue
+            for addr in set(EMAIL_RE.findall((gmail_api.header(msg, "To") or "").lower())):
+                if _registrar_envio_detectado(c, conta, addr, ts):
+                    detectados += 1
+        c.commit()
+    finally:
+        c.close()
+    return {"ok": True, "detectados": detectados}
+
+
+def _registrar_envio_detectado(c, conta, addr, ts):
+    if conta == "nexora":
+        l = _nexora_lead_by_email(addr)
+        if not l:
+            return False
+        if l["etapa"] == "Pronto":                          # ainda nao enviado pelo pipeline: foi enviado a mao
+            conn = ndb.connect()
+            try:
+                cur = conn.execute("UPDATE leads SET status='enviado', sent_at=?, updated_at=? WHERE id=? AND status IN ('pronto','aprovado')", (ts, ts, int(l["ref"][1:])))
+                if cur.rowcount:
+                    ndb.log_activity(conn, int(l["ref"][1:]), "enviado", "Envio manual detectado no Gmail.")
+                conn.commit()
+            finally:
+                conn.close()
+            store.registrar_envio(c, l, 0, "gmail_manual", ts)
+            return True
+        t = store.followup_devido_para(c, l["ref"])
+        if t:
+            store.concluir_tarefa(c, t["id"], "gmail_manual", 0)
+        else:
+            store.registrar_envio(c, l, 99, "gmail_manual", ts)
+        return True
+    lead = _lead_dict_crm(c, conta, addr)
+    if not lead:
+        return False
+    if lead["etapa"] in ("Novo", "Pronto"):
+        store.marcar_primeiro_envio(c, lead, "gmail_manual", ts)
+    else:
+        t = store.followup_devido_para(c, lead["ref"])
+        if t:
+            store.concluir_tarefa(c, t["id"], "gmail_manual", 0)
+        else:
+            store.registrar_envio(c, lead, 99, "gmail_manual", ts)
+    return True
+
+
 _reclass_lock = threading.Lock()
 
 
@@ -219,6 +293,7 @@ def _mime(conta, env, address, to, assunto, corpo):
     nome = env.get("NEXORA_SENDER_NAME", "Nexora") if conta == "nexora" else "Enos | Atlas"
     m["Subject"], m["From"], m["To"] = assunto, "%s <%s>" % (nome, address), to
     m["List-Unsubscribe"] = "<mailto:%s?subject=unsubscribe>" % address
+    m["X-CRM-Origem"] = "crm"
     return m.as_bytes()
 
 

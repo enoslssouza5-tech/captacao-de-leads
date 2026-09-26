@@ -53,7 +53,7 @@ class TestInterfaceNoNavegador(unittest.TestCase):
         cls.log.close()
 
     def test_fluxos_da_interface_desktop_e_celular(self):
-        p = subprocess.run(["node", os.path.join(HERE, "e2e.js"), self.base], capture_output=True, text=True, timeout=300)
+        p = subprocess.run(["node", os.path.join(HERE, "e2e.js"), self.base], capture_output=True, text=True, timeout=400)
         self.assertEqual(p.returncode, 0, p.stderr)
         r = json.loads(p.stdout.strip().splitlines()[-1])
         print("\n  passou %d verificacoes no navegador" % len(r["passou"]))

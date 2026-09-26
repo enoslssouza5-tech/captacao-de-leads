@@ -19,21 +19,22 @@ async function funil(raiz) {
   busca.addEventListener("input", () => { LF.busca = busca.value; pintar(); });
   raiz.append(el("div", { style: "display:flex;gap:12px;margin-bottom:18px;flex-wrap:wrap;align-items:center" },
     el("div", { class: "chips" }, [["todos", "Todos"], ["email", "E-mail"], ["whatsapp", "WhatsApp"]].map(([k, r]) => el("button", { class: "chip" + (LF.canal === k ? " on" : ""), onclick: () => { LF.canal = k; renderizar(); } }, r))), busca));
-  if (S.conta === "nexora") raiz.append(el("div", { class: "note info" }, "E-mails da Nexora: aprovação e envio agora acontecem na tela Hoje. As respostas movem os cards sozinhas."));
+  if (S.conta === "nexora") raiz.append(el("div", { class: "note info" }, "Arraste os cards entre as etapas. Na Nexora, Pronto e Contatado dependem do e-mail real (aprovação e envio na tela Hoje); as respostas movem os cards sozinhas."));
   const quadro = el("div", { class: "board fade" });
+  quadro.addEventListener("dragend", () => { quadro.classList.remove("arrastando"); $$(".col.over", quadro).forEach((c) => c.classList.remove("over")); });
   raiz.append(quadro);
   function pintar() {
     quadro.replaceChildren();
     for (const etapa of ETAPAS) {
       const cards = todos[etapa].filter((c) => (LF.canal === "todos" || c.canal === LF.canal) && (!LF.busca || c.nome.toLowerCase().includes(LF.busca.toLowerCase())));
       const col = el("div", { class: "col" }, el("div", { class: "col-h" }, etapa, el("span", { class: "n" }, cards.length)), el("div", { class: "cards" }, cards.length ? cards.slice(0, 80).map(cartaoKanban) : el("div", { class: "faint", style: "padding:8px 4px;font-size:12.5px" }, "Vazio")));
-      col.addEventListener("dragover", (e) => { e.preventDefault(); col.classList.add("over"); });
-      col.addEventListener("dragleave", () => col.classList.remove("over"));
+      col.dataset.etapa = etapa;
+      col.addEventListener("dragover", (e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; col.classList.add("over"); });
+      col.addEventListener("dragleave", (e) => { if (!col.contains(e.relatedTarget)) col.classList.remove("over"); });
       col.addEventListener("drop", async (e) => {
-        e.preventDefault(); col.classList.remove("over");
-        const id = e.dataTransfer.getData("text/plain");
-        if (id.startsWith("c")) { await post(`/api/leads/${id.slice(1)}/editar`, { etapa }); renderizar(); }
-        else toast("Leads de e-mail da Nexora mudam de etapa pelas respostas e aprovações", "err");
+        e.preventDefault(); col.classList.remove("over"); quadro.classList.remove("arrastando");
+        const ref = e.dataTransfer.getData("text/plain");
+        if (ref) await moverLead(ref, etapa);
       });
       quadro.append(col);
     }
@@ -41,11 +42,35 @@ async function funil(raiz) {
   pintar();
 }
 
+/* Arrastar e soltar move o lead pelas regras do funil (servidor). Em tela de toque, o botao "Mover" abre uma folha com as etapas. */
+async function moverLead(ref, etapa) {
+  try {
+    const r = await fetch("/api/mover", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ref, etapa }) });
+    if (r.status === 401) return location.reload();
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) toast(j.erro || "Não foi possível mover", "err");
+    else if (!j.igual) toast("Movido para " + etapa, "ok");
+  } catch (e) { toast("Falha de conexão ao mover", "err"); }
+  renderizar();
+}
+
+function folhaMover(l) {
+  const ov = $("#overlay");
+  const fechar = () => ov.replaceChildren();
+  ov.replaceChildren(el("div", { class: "sheet", onclick: (e) => { if (e.target.classList.contains("sheet")) fechar(); } }, el("div", {},
+    el("div", { style: "font-weight:620;margin-bottom:4px" }, l.nome), el("div", { class: "faint", style: "font-size:12.5px;margin-bottom:12px" }, "Mover para a etapa"),
+    ETAPAS.map((e) => el("button", { class: "nav" + (e === l.etapa ? " on" : ""), disabled: e === l.etapa, style: "width:100%;text-align:left;min-height:46px", onclick: async () => { fechar(); await moverLead(String(l.ref || l.id), e); } }, e + (e === l.etapa ? "  (atual)" : "")))
+  )));
+}
+
 function cartaoKanban(l) {
-  const c = el("div", { class: "kc" + (l.score >= 70 ? " p-alta" : ""), draggable: l.readonly ? "false" : "true", onclick: () => abrirLead(l.ref || l.id) },
+  const ref = String(l.ref || l.id);
+  const c = el("div", { class: "kc" + (l.score >= 70 ? " p-alta" : ""), draggable: "true", onclick: () => abrirLead(ref) },
     el("div", { class: "nm" }, l.nome), el("div", { class: "mt" }, canalIc(l.canal), l.score != null ? el("span", {}, "oportunidade " + l.score) : "", l.aprovado ? pill("ok", "aprovado") : ""),
-    l.proxima ? el("div", { class: "pr" }, l.proxima) : "");
-  c.addEventListener("dragstart", (e) => e.dataTransfer.setData("text/plain", String(l.ref || l.id)));
+    l.proxima ? el("div", { class: "pr" }, l.proxima) : "",
+    el("button", { class: "btn ghost sm so-toque", "aria-label": "Mover " + l.nome, onclick: (e) => { e.stopPropagation(); folhaMover(l); } }, icon("arrow"), "Mover"));
+  c.addEventListener("dragstart", (e) => { e.dataTransfer.setData("text/plain", ref); e.dataTransfer.effectAllowed = "move"; c.classList.add("arrastado"); c.closest(".board")?.classList.add("arrastando"); });
+  c.addEventListener("dragend", () => c.classList.remove("arrastado"));
   return c;
 }
 
@@ -120,16 +145,14 @@ async function abrirLead(ref, aba = "resumo") {
     if (l.canal === "whatsapp" && l.mensagem && link) rodape.append(el("a", { class: "btn", href: link + "?text=" + encodeURIComponent(l.mensagem), target: "_blank", rel: "noopener" }, icon("chat"), "Abrir no WhatsApp"));
     rodape.append(botaoAcao("Analisar dor", async () => { await post(`/api/leads/${ref.slice(1)}/analisar`); toast("Análise iniciada", "ok"); }, "btn sec sm", "refresh"),
       botaoAcao("Editar mensagem", async () => { fecharGaveta(); editarMensagem({ ref, lead_id: ref.slice(1), canal: l.canal, assunto: l.assunto }); }, "btn sec sm", "star"));
-    const mover = el("select", { style: "width:auto;min-height:34px;padding:4px 10px", "aria-label": "Mover para etapa" }, el("option", { value: "" }, "Mover para…"), ETAPAS.map((e) => el("option", { value: e }, e)));
-    mover.addEventListener("change", async () => { if (mover.value) { await post(`/api/leads/${ref.slice(1)}/editar`, { etapa: mover.value }); fecharGaveta(); renderizar(); } });
-    rodape.append(mover, botaoAcao("Descartar", async () => { await post(`/api/leads/${ref.slice(1)}/descartar`); fecharGaveta(); renderizar(); }, "btn danger sm"));
+    rodape.append(botaoAcao("Descartar", async () => { await post(`/api/leads/${ref.slice(1)}/descartar`); fecharGaveta(); renderizar(); }, "btn danger sm"));
   } else if (l.etapa === "Pronto" && !l.aprovado) {
     rodape.append(botaoAcao("Aprovar e-mail", async () => { await post("/api/nexora/aprovar", { ids: [Number(ref.slice(1))] }); toast("Aprovado", "ok"); fecharGaveta(); renderizar(); }, "btn sm", "check"),
       botaoAcao("Rejeitar", async () => { await post("/api/nexora/rejeitar", { ids: [Number(ref.slice(1))], motivo: "rejeitado no CRM" }); fecharGaveta(); renderizar(); }, "btn danger sm"));
   }
   const cab = el("div", { class: "drawer-h" }, el("div", { style: "display:flex;gap:14px;align-items:flex-start" },
-    l.score != null ? anel(l.score, 46) : "", el("div", { style: "flex:1;min-width:0" }, el("div", { style: "font-size:19px;font-weight:620;letter-spacing:-.01em" }, l.nome),
-      el("div", { class: "faint", style: "font-size:13px;margin-top:2px" }, [l.cidade || l.sub, l.telefone, l.email].filter(Boolean).join(" · "))),
+    l.score != null ? el("div", { style: "text-align:center" }, anel(l.score, 54, 5), el("div", { class: "faint", style: "font-size:10.5px;margin-top:3px;letter-spacing:.04em" }, "OPORTUNIDADE")) : "", el("div", { style: "flex:1;min-width:0" }, el("div", { style: "font-size:19px;font-weight:620;letter-spacing:-.01em" }, l.nome),
+      el("div", { class: "faint", style: "font-size:13px;margin-top:2px" }, [l.cidade || l.sub, fmtTel(l.telefone), l.email].filter(Boolean).join(" · "))),
     el("button", { class: "btn ghost sm", "aria-label": "Fechar", onclick: fecharGaveta }, icon("x"))),
     el("div", { style: "display:flex;gap:6px;margin-top:10px;flex-wrap:wrap" }, pill("ac", l.etapa), pill("", l.canal === "whatsapp" ? "WhatsApp" : "E-mail"), l.tipo_dor ? pill("warn", nomeDor(l.tipo_dor)) : "", l.aprovado ? pill("ok", "aprovado") : ""), abas);
   ov.replaceChildren(el("div", { class: "veil", onclick: fecharGaveta }), el("aside", { class: "drawer", role: "dialog", "aria-label": "Detalhes do lead" }, cab, corpo, rodape));
@@ -140,10 +163,16 @@ function fecharGaveta() { $("#overlay").replaceChildren(); }
 
 function abaResumo(l, crit, evid, valid) {
   const d = el("div", { class: "fade" });
-  if (l.dor) d.append(el("div", { class: "sec-h", style: "margin-top:18px" }, el("h2", {}, "Dor principal")), el("div", { style: "font-size:15px;line-height:1.5" }, l.dor));
+  const sec = (t, ...filhos) => d.append(el("div", { class: "sec-h", style: "margin-top:22px" }, el("h2", {}, t)), ...filhos.flat(Infinity));
+  if (txt(l.dor)) sec("Dor principal", el("div", { style: "font-size:15px;line-height:1.5" }, txt(l.dor)));
   else d.append(el("div", { class: "note info", style: "margin-top:18px" }, "Ainda sem análise de dor."));
-  if (crit.length) d.append(el("div", { class: "sec-h", style: "margin-top:22px" }, el("h2", {}, "Critérios analisados")), crit.map((c) => el("div", { class: "crit" }, el("b", {}, c.criterio || ""), pill(c.impacto === "alto" ? "err" : c.impacto === "medio" ? "warn" : "info", c.impacto || ""), el("div", { class: "a", style: "grid-column:1/-1" }, c.achado || ""))));
-  if (evid.length) d.append(el("div", { class: "sec-h", style: "margin-top:22px" }, el("h2", {}, "Evidências")), el("ul", { class: "muted", style: "margin:0;padding-left:18px" }, evid.map((e) => el("li", {}, typeof e === "string" ? e : JSON.stringify(e)))));
+  const criterios = crit.map((c) => ({ nome: capitalizar(txt(c && c.criterio)), achado: txt(c && c.achado), impacto: String((c && c.impacto) || "").toLowerCase() })).filter((c) => c.nome || c.achado);
+  if (criterios.length) sec("Critérios analisados", criterios.map((c) => el("div", { class: "crit" }, el("b", {}, c.nome),
+    c.impacto ? pill(c.impacto === "alto" ? "err" : c.impacto === "medio" || c.impacto === "médio" ? "warn" : "info", { alto: "Impacto alto", medio: "Impacto médio", "médio": "Impacto médio", baixo: "Impacto baixo" }[c.impacto] || capitalizar(c.impacto)) : "",
+    c.achado ? el("div", { class: "a", style: "grid-column:1/-1" }, c.achado) : "")));
+  const evidencias = evid.map((e) => ({ t: txt(e), f: fonteTxt(e) })).filter((e) => e.t);
+  if (evidencias.length) sec("Evidências", el("ul", { class: "muted", style: "margin:0;padding-left:18px;line-height:1.55" },
+    evidencias.map((e) => el("li", {}, e.t, e.f ? el("span", { class: "faint", style: "font-size:12px" }, "  ·  " + e.f) : ""))));
   const texto = l.mensagem || l.corpo_texto || l.nota;
   if (texto) {
     d.append(el("div", { class: "sec-h", style: "margin-top:22px" }, el("h2", {}, l.canal === "email" ? "E-mail" : "Mensagem"),
@@ -152,7 +181,11 @@ function abaResumo(l, crit, evid, valid) {
       valid && valid.violacoes.length ? el("div", { style: "color:var(--err);font-size:12.5px;margin-top:8px" }, valid.violacoes.map((v) => el("div", {}, "• " + v))) : "",
       el("div", { style: "margin-top:10px" }, botaoAcao("Copiar", () => copiar(texto), "btn ghost sm", "copy")));
   }
-  if (l.notas) d.append(el("div", { class: "sec-h", style: "margin-top:22px" }, el("h2", {}, "Notas")), el("div", { class: "muted", style: "white-space:pre-wrap" }, l.notas));
+  const linhasNota = txt(l.notas).split("\n").filter(Boolean);
+  const reprov = linhasNota.filter((n) => /reprovada/i.test(n));
+  if (reprov.length) d.insertBefore(el("div", { class: "note err", style: "margin-top:18px" }, el("b", {}, "Abordagem reprovada, não será enviada. "), reprov.map((n) => n.replace(/^.*?Motivo:\s*/i, "")).join(" ")), d.firstChild);
+  const outras = linhasNota.filter((n) => !/reprovada/i.test(n));
+  if (outras.length) sec("Notas", el("div", { class: "muted", style: "line-height:1.55" }, outras.map((n) => el("div", {}, n))));
   return d;
 }
 
@@ -164,7 +197,7 @@ function abaConversa(l, r) {
   if (!itens.length) return vazio("Nenhuma mensagem ainda", "Envios e respostas detectados aparecem aqui.");
   const ultResp = (r.respostas || []).filter((x) => x.origem === "whatsapp").slice(-1)[0];
   return el("div", { class: "thread fade", style: "margin-top:18px" }, itens.map((m) => el("div", { class: "bolha " + m.dir }, m.txt,
-    el("small", {}, [m.via, dataHora(m.t)].join(" · ")), m.cls ? clsPill(m.cls) : "", m.trad && m.trad !== m.txt ? el("small", {}, "Tradução: " + m.trad) : "", m.resumo ? el("small", {}, m.resumo) : "")),
+    el("small", {}, [m.via, dataHora(m.t)].join(" · ")), m.cls ? clsPill(m.cls) : "", S.conta === "nexora" && m.txt ? botaoTraduzir(m.txt, "en", "pt", m.trad && m.trad !== m.txt ? m.trad : "") : (m.trad && m.trad !== m.txt ? el("small", {}, "Tradução: " + m.trad) : ""), m.resumo ? el("small", {}, m.resumo) : "")),
     ultResp ? el("div", { style: "margin-top:8px" }, "Última classificação: ", clsPill(ultResp.classificacao)) : "");
 }
 

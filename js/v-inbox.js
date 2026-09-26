@@ -53,7 +53,8 @@ async function lerConversa(id, alvo, box) {
   const emLixeira = ultima.rotulos.includes("TRASH"), lida = !ultima.rotulos.includes("UNREAD"), enviada = (m) => m.rotulos.includes("SENT");
   const outra = ms.slice().reverse().find((m) => !enviada(m)) || ultima;
   const destino = enviada(ultima) ? ((ultima.para.match(/[\w.+-]+@[\w.-]+/) || [""])[0]) : outra.de.email;
-  const resp = el("textarea", { placeholder: destino ? "Responder para " + destino : "Sem destinatário", "aria-label": "Resposta" });
+  const nexora = S.conta === "nexora";
+  const resp = el("textarea", { placeholder: nexora ? "Resposta em inglês (é o que será enviado)" : (destino ? "Responder para " + destino : "Sem destinatário"), "aria-label": "Resposta" });
   let extra = "";
   if (t.lead) {
     const lr = await api(`/api/lead?ref=${encodeURIComponent(t.lead.ref)}`).catch(() => null);
@@ -73,9 +74,9 @@ async function lerConversa(id, alvo, box) {
       corpo.hidden = ms.length > 1 && i < ms.length - 1;
       return el("div", { class: "mail-b" }, el("header", { onclick: () => { corpo.hidden = !corpo.hidden; } }, avatar(m.de.nome),
         el("div", { style: "flex:1;min-width:0" }, el("b", {}, m.de.nome), el("div", { class: "faint", style: "font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" }, "para " + m.para)), el("span", { class: "faint", style: "font-size:12px" }, dataHora(new Date(m.data).toISOString()))),
-        corpo, m.anexos.length ? el("div", { class: "faint", style: "padding:0 0 8px 44px;font-size:12px" }, "Anexos: " + m.anexos.join(", ")) : "");
+        corpo, nexora && m.corpo ? el("div", { style: "padding:0 0 4px 44px" }, botaoTraduzir(m.corpo, "en", "pt")) : "", m.anexos.length ? el("div", { class: "faint", style: "padding:0 0 8px 44px;font-size:12px" }, "Anexos: " + m.anexos.join(", ")) : "");
     }),
-    el("div", { class: "resp" }, resp, el("div", { class: "row-b", style: "margin:0" }, botaoAcao("Enviar resposta", async () => {
+    el("div", { class: "resp" }, nexora ? compositorIngles(resp) : resp, el("div", { class: "row-b", style: "margin:0" }, botaoAcao(nexora ? "Enviar em inglês" : "Enviar resposta", async () => {
       if (!resp.value.trim() || !destino) return;
       if (!(await confirmar("Enviar esta resposta?", "Para " + destino + ". Será enviada do seu Gmail agora.", "Enviar"))) return;
       const assunto = /^re:/i.test(ultima.assunto) ? ultima.assunto : "Re: " + ultima.assunto;
@@ -121,10 +122,11 @@ async function inboxWhatsapp(raiz, alvoRef) {
   const ultCls = (r.respostas || []).filter((x) => x.origem === "whatsapp").slice(-1)[0];
   const proxima = msgs.length && msgs[msgs.length - 1].direcao === "entrada" ? "Responder no WhatsApp" : (r.tarefas.find((t) => t.status === "pendente") ? "Follow-up " + r.tarefas.find((t) => t.status === "pendente").passo + " em " + new Date(r.tarefas.find((t) => t.status === "pendente").due_date + "T12:00:00").toLocaleDateString("pt-BR", { day: "2-digit", month: "short" }) : "Aguardar resposta");
   leitura.append(el("button", { class: "btn ghost sm so-mobile", onclick: () => ir("inbox", "whatsapp") }, icon("back"), "Voltar"),
-    el("div", { style: "display:flex;gap:12px;align-items:center" }, avatar(l.nome), el("div", { style: "flex:1;min-width:0" }, el("h2", { style: "margin:0" }, l.nome), el("div", { class: "faint", style: "font-size:13px" }, l.telefone || "")),
+    el("div", { style: "display:flex;gap:12px;align-items:center" }, avatar(l.nome), el("div", { style: "flex:1;min-width:0" }, el("h2", { style: "margin:0" }, l.nome), el("div", { class: "faint", style: "font-size:13px" }, fmtTel(l.telefone) || "")),
       el("button", { class: "btn ghost sm", onclick: () => abrirLead(alvoRef) }, "Ver lead")),
     el("div", { style: "display:flex;gap:6px;margin:12px 0;flex-wrap:wrap" }, pill("ac", l.etapa), ultCls ? clsPill(ultCls.classificacao) : "", pill("info", "Próxima ação: " + proxima)),
-    el("div", { class: "thread", style: "margin:16px 0" }, msgs.length ? msgs.map((m) => el("div", { class: "bolha " + (m.direcao === "saida" ? "out" : "in") }, m.texto, el("small", {}, dataHora(m.created_at)))) : el("div", { class: "faint" }, "Nenhuma mensagem detectada ainda.")),
+    el("div", { class: "thread", style: "margin:16px 0" }, msgs.length ? msgs.map((m) => el("div", { class: "bolha " + (m.direcao === "saida" ? "out" : "in") }, m.texto, S.conta === "nexora" && m.texto ? botaoTraduzir(m.texto, "en", "pt") : "", el("small", {}, dataHora(m.created_at)))) : el("div", { class: "faint" }, "Nenhuma mensagem detectada ainda.")),
+    S.conta === "nexora" ? el("div", { style: "margin:6px 0 14px" }, el("div", { class: "faint", style: "font-size:12px;margin-bottom:6px" }, "Prepare a resposta em inglês, copie e envie você mesmo no WhatsApp."), (() => { const en = el("textarea", { placeholder: "Resposta em inglês", "aria-label": "Resposta em inglês" }); return el("div", {}, compositorIngles(en), botaoAcao("Copiar inglês", () => copiar(en.value), "btn ghost sm", "copy")); })()) : "",
     link ? el("a", { class: "btn", href: link + (l.mensagem && !msgs.length ? "?text=" + encodeURIComponent(l.mensagem) : ""), target: "_blank", rel: "noopener" }, icon("chat"), "Abrir no WhatsApp") : "",
     el("div", { class: "faint", style: "font-size:12px;margin-top:10px" }, "O CRM não envia mensagens. Você envia no WhatsApp e o envio é detectado aqui."));
 }

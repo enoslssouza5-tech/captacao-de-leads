@@ -3,6 +3,7 @@ import json
 
 import ia
 import store
+import verificacao
 
 
 def _job(c, tipo, conta, status, detalhe=""):
@@ -44,6 +45,13 @@ def inserir_lead_captado(c, conta, d):
     for chave in (tel, email):
         if chave and c.execute("SELECT 1 FROM bloqueios WHERE conta=? AND chave=?", (conta, chave)).fetchone():
             return False
+    nota_email = None
+    if email:
+        ok_email, motivo = verificacao.verificar_email(email)
+        if not ok_email:
+            if not (tel and conta == "atlas"):
+                return False                                  # lead so de e-mail com e-mail invalido: nao entra
+            nota_email, email = "E-mail descartado na verificacao: " + motivo, None
     canal = "whatsapp" if tel and conta == "atlas" else ("email" if email else None)
     if not canal:
         return False
@@ -51,7 +59,7 @@ def inserir_lead_captado(c, conta, d):
     fixo = 1 if canal == "whatsapp" and not eh_celular(tel) else 0
     c.execute("INSERT INTO leads (conta,canal,etapa,nome,telefone,email,cidade,site,fonte,nota_google,avaliacoes,sem_whatsapp,notas,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
               (conta, canal, "Novo", nome, tel, email, d.get("cidade"), d.get("site"), "apify:google-maps", d.get("nota_google"), d.get("avaliacoes"), fixo,
-               "Telefone fixo: sem WhatsApp, contato so por ligacao" if fixo else None, ts, ts))
+               "\n".join(x for x in ("Telefone fixo: sem WhatsApp, contato so por ligacao" if fixo else None, nota_email) if x) or None, ts, ts))
     return True
 
 
@@ -69,6 +77,29 @@ def captar_job(conta, cidade, categoria, quantidade):
         c.close()
 
 
+def mensagens_recentes(c, conta, fora_id=None, n=30):
+    return [r["mensagem"] for r in c.execute("SELECT mensagem FROM leads WHERE conta=? AND mensagem IS NOT NULL AND id<>? ORDER BY id DESC LIMIT ?", (conta, fora_id or 0, n))]
+
+
+def reescrever_prontos():
+    """Reescreve no modelo curto as abordagens de WhatsApp da Atlas que ainda nao foram enviadas. Reprovada pelo validador: nao entra na fila."""
+    c = store.crm()
+    feitos = []
+    try:
+        for r in c.execute("SELECT * FROM leads WHERE conta='atlas' AND canal='whatsapp' AND etapa='Pronto' AND dor IS NOT NULL ORDER BY id").fetchall():
+            texto, viol = ia.reescrever_abordagem(dict(r), recentes=mensagens_recentes(c, "atlas", r["id"]))
+            if viol:
+                nota = ((r["notas"] or "") + "\nAbordagem reprovada nas regras e NAO sera enviada. Motivo: " + "; ".join(viol)).strip()
+                c.execute("UPDATE leads SET mensagem=NULL, etapa='Novo', notas=?, updated_at=? WHERE id=?", (nota, store.now(), r["id"]))
+            else:
+                c.execute("UPDATE leads SET mensagem=?, updated_at=? WHERE id=?", (texto, store.now(), r["id"]))
+            c.commit()
+            feitos.append((r["id"], "reprovada" if viol else "ok"))
+    finally:
+        c.close()
+    return feitos
+
+
 def analisar_lead(lid):
     c = store.crm()
     r = c.execute("SELECT * FROM leads WHERE id=?", (lid,)).fetchone()
@@ -77,14 +108,14 @@ def analisar_lead(lid):
         return
     jid = _job(c, "analise", r["conta"], "rodando", r["nome"])
     try:
-        d = ia.analyze_lead({k: r[k] for k in ("nome", "cidade", "site", "telefone", "email", "avaliacoes", "nota_google", "fonte", "notas")})
+        d = ia.analyze_lead({k: r[k] for k in ("nome", "cidade", "site", "telefone", "email", "avaliacoes", "nota_google", "fonte", "notas")}, recentes=mensagens_recentes(c, r["conta"], lid))
         campo = "email" if r["canal"] == "email" else "mensagem"
         mensagem = d.get(campo)
         reprovada = (d.get("violacoes") or {}).get(campo)
         nota = r["notas"]
         if reprovada:                       # a mensagem quebra as regras de copy: nao entra na fila
             mensagem = None
-            nota = ((nota or "") + "\nMensagem reprovada nas regras: " + "; ".join(reprovada)).strip()
+            nota = ((nota or "") + "\nAbordagem reprovada nas regras e NAO sera enviada. Motivo: " + "; ".join(reprovada)).strip()
         etapa = "Pronto" if (mensagem and r["etapa"] == "Novo") else r["etapa"]
         c.execute("UPDATE leads SET dor=?, tipo_dor=?, criterios_json=?, mensagem=?, assunto=COALESCE(?, assunto), etapa=?, notas=?, updated_at=? WHERE id=?",
                   (d.get("dor"), d.get("tipo_dor"), json.dumps({"criterios": d.get("criterios"), "evidencias": d.get("evidencias")}, ensure_ascii=False),

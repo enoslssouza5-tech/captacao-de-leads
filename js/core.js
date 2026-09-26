@@ -36,6 +36,7 @@ const IC = {
   check: '<path d="m4.5 12.5 5 5 10-11"/>',
   x: '<path d="M6 6l12 12M18 6 6 18"/>',
   arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/>',
   back: '<path d="M19 12H5M11 6l-6 6 6 6"/>',
   mail: '<rect x="3" y="5.5" width="18" height="13" rx="2.5"/><path d="m4 7.5 8 6 8-6"/>',
   chat: '<path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8a2.5 2.5 0 0 1-2.5 2.5H10l-4.5 4v-4A2.5 2.5 0 0 1 4 13.5Z"/>',
@@ -67,11 +68,85 @@ function montarIcones(raiz = document) {
   $$("[data-ic]", raiz).forEach((n) => { if (!n.firstChild) n.replaceChildren(icon(n.dataset.ic)); });
 }
 
+/* ---------- texto humano ---------- */
+function fmtTel(t) {
+  if (!t) return "";
+  let d = String(t).replace(/\D/g, "");
+  if (d.length >= 12 && d.startsWith("55")) d = d.slice(2);
+  if (d.length === 11) return `(${d.slice(0, 2)}) ${d.slice(2, 7)}-${d.slice(7)}`;
+  if (d.length === 10) return `(${d.slice(0, 2)}) ${d.slice(2, 6)}-${d.slice(6)}`;
+  if (d.length < 8) return String(t);
+  return String(t).startsWith("+") ? String(t) : "+" + d;
+}
+/* qualquer valor vira frase legivel; nunca "[object ...]" nem JSON cru */
+function txt(v) {
+  if (v == null) return "";
+  if (typeof v === "string") return v.trim();
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  if (Array.isArray(v)) return v.map(txt).filter(Boolean).join("; ");
+  const chave = ["fato", "evidencia", "achado", "texto", "descricao", "detalhe", "valor", "nome"].find((k) => typeof v[k] === "string" && v[k].trim());
+  if (chave) return v[chave].trim();
+  return Object.values(v).filter((x) => typeof x === "string").join(". ");
+}
+function fonteTxt(v) {
+  const f = v && typeof v === "object" && !Array.isArray(v) ? v.fonte || v.fonte_url || v.url : "";
+  if (!f || typeof f !== "string") return "";
+  try { return new URL(f).hostname.replace(/^www\./, ""); } catch (e) { return f.length > 40 ? f.slice(0, 40) + "…" : f; }
+}
+const capitalizar = (s) => { s = String(s || "").replace(/_/g, " ").trim(); return s.charAt(0).toUpperCase() + s.slice(1); };
+
+/* ---------- traducao: so para COMPREENDER (en->pt) ou PREPARAR a resposta (pt->en). A Nexora sempre envia em ingles. ---------- */
+const TRAD = new Map();
+async function traduzirTexto(texto, de, para) {
+  const k = de + ">" + para + "|" + texto;
+  if (TRAD.has(k)) return TRAD.get(k);
+  const j = await post("/api/traduzir", { texto, de, para }, { silencioso: true });
+  TRAD.set(k, j.traducao);
+  return j.traducao;
+}
+/* Botao "Traduzir": abre uma caixa TRADUCAO separada, abaixo do original. Nunca substitui o original. `texto` pode ser string ou funcao. */
+function botaoTraduzir(texto, de = "en", para = "pt", pronta = "") {
+  const caixa = el("div", { class: "trad", hidden: true });
+  const b = el("button", { class: "btn ghost sm trad-b", type: "button" }, icon("globe"), "Traduzir");
+  const rotulo = para === "pt" ? "TRADUÇÃO PARA O PORTUGUÊS · só para você entender" : "VERSÃO EM INGLÊS · é isto que será enviado";
+  const mostrar = (t) => caixa.replaceChildren(el("span", { class: "rot" }, rotulo), el("div", { style: "white-space:pre-wrap" }, t));
+  b.addEventListener("click", async () => {
+    if (!caixa.hidden) { caixa.hidden = true; b.lastChild.textContent = "Traduzir"; return; }
+    const origem = typeof texto === "function" ? texto() : texto;
+    if (!String(origem || "").trim()) return toast("Não há texto para traduzir", "err");
+    caixa.hidden = false;
+    if (pronta && typeof texto !== "function") mostrar(pronta);
+    else {
+      caixa.replaceChildren(el("span", { class: "rot" }, "Traduzindo…"));
+      try { mostrar(await traduzirTexto(origem, de, para)); } catch (e) { caixa.replaceChildren(el("span", { class: "rot", style: "color:var(--err)" }, e.message || "Falha ao traduzir")); return; }
+    }
+    b.lastChild.textContent = "Ocultar tradução";
+  });
+  const w = el("div", { class: "trad-wrap" }, b, caixa);
+  w.addEventListener("click", (e) => e.stopPropagation());
+  return w;
+}
+/* Escrever em portugues e preparar em ingles. `en` e o textarea do texto que sera ENVIADO (sempre em ingles). */
+function compositorIngles(en, aoPreparar) {
+  const pt = el("textarea", { placeholder: "Escreva sua resposta em português (opcional)", "aria-label": "Rascunho em português", style: "min-height:64px" });
+  const prep = el("button", { class: "btn sec sm", type: "button" }, icon("refresh"), "Preparar em inglês");
+  prep.addEventListener("click", async () => {
+    if (!pt.value.trim()) return toast("Escreva o rascunho em português primeiro", "err");
+    prep.disabled = true;
+    try { en.value = await traduzirTexto(pt.value, "pt", "en"); if (aoPreparar) aoPreparar(); toast("Versão em inglês pronta. Revise antes de enviar.", "ok"); }
+    catch (e) { toast(e.message || "Falha ao traduzir", "err"); } finally { prep.disabled = false; }
+  });
+  return el("div", { class: "comp-en" },
+    pt, el("div", { style: "display:flex;gap:8px;align-items:center;margin:6px 0 10px;flex-wrap:wrap" }, prep, el("span", { class: "idioma-envio" }, "IDIOMA DO ENVIO: INGLÊS")),
+    en, botaoTraduzir(() => en.value, "en", "pt"));
+}
+
 /* ---------- API ---------- */
 async function api(url) {
   const r = await fetch(url, { headers: { Accept: "application/json" } });
   let j = null;
   try { j = await r.json(); } catch (e) { /* corpo vazio */ }
+  if (r.status === 401) { location.reload(); }
   if (!r.ok) { const err = new Error((j && j.erro) || "Erro " + r.status); err.status = r.status; throw err; }
   return j;
 }
@@ -79,6 +154,7 @@ async function post(url, body = {}, opts = {}) {
   try {
     const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const j = await r.json().catch(() => ({}));
+    if (r.status === 401) location.reload();
     if (!r.ok) throw Object.assign(new Error(j.erro || "Erro " + r.status), { status: r.status });
     return j;
   } catch (e) {

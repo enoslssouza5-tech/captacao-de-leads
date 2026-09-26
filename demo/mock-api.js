@@ -136,6 +136,11 @@
         const b = opts.body ? JSON.parse(opts.body) : {};
         if (p.path === "/api/validar") corpo = { violacoes: [] };
         else if (p.path === "/api/nexora/enviar") corpo = { a_enviar: 2, minutos_estimados: 1.5 };
+        else if (p.path === "/api/mover") {
+          const alvo = Object.values(CONTAS).flatMap((x) => x.leads).find((l) => l[0] === b.ref);
+          if (alvo) alvo[3] = b.etapa;
+          corpo = { ok: true, demo: true };
+        } else if (p.path === "/api/traduzir") corpo = { traducao: b.para === "pt" ? "(demonstração) Tradução para o português." : "(demo) English translation.", cache: false, de: b.de, para: b.para };
         else corpo = { ok: true, demo: true };
         void b;
       } else corpo = responder(conta(p), p);

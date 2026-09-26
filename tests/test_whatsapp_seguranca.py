@@ -98,7 +98,11 @@ class TestIntegracaoNodePython(BaseCRM):
         self.assertTrue(all(v == "bloqueado" for v in res["bloqueio"].values()), res["bloqueio"])   # nao consegue enviar nada
         msgs = self.get("/api/wa/conversa?ref=c%d" % lid)[1]["mensagens"]
         self.assertEqual([(m["direcao"], m["texto"]) for m in msgs],
-                         [("saida", "Bom dia!"), ("entrada", "Tenho interesse, quero conversar"), ("entrada", "[mensagem de audio]")])   # sem numero desconhecido, grupo ou status
+                         [("saida", "Bom dia!"), ("entrada", "Tenho interesse, quero conversar"), ("entrada", "[mensagem de audio]"),
+                          ("saida", "enviada via lid"), ("entrada", "resposta via lid"), ("saida", "lid sem resolucao")])   # lid resolvido; sem numero desconhecido, grupo, status ou lid impossivel
+        atividade = " | ".join(self.get("/api/conexoes")[1]["whatsapp"]["atividade"])
+        self.assertIn("nao consegui resolver o numero", atividade)          # o que nao da para identificar fica visivel, nao some em silencio
+        self.assertIn("nao e um lead do CRM", atividade)
         self.esperar(lambda: self.lead_db(lid)["etapa"] == "Negociando", msg="lead nao chegou em Negociando")
         self.assertEqual(len(self.sql("SELECT * FROM envios WHERE lead_ref=? AND passo=0", "c%d" % lid)), 1)
 

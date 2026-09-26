@@ -26,3 +26,6 @@ backups/
 logs/
 wa-watcher/.linked
 *.corrompido-*
+acesso.json
+*.sqlite3-shm
+*.sqlite3-wal

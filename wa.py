@@ -6,6 +6,7 @@ Resolve os defeitos encontrados na auditoria:
 - "desconectar" matava so o Node e deixava o Chrome vivo;
 - QR expirado sem aviso e sem renovacao.
 """
+import logging
 import os
 import subprocess
 import sys
@@ -61,6 +62,7 @@ class WAManager:
         self.tentativas = 0
         self.renovacoes_qr = 0
         self.proxima_tentativa = 0.0
+        self.atividade = []     # o que o observador viu de mensagens (sem texto)
         self.eventos = []       # historico curto de decisoes do gerenciador
         self._thread = None
 
@@ -68,6 +70,13 @@ class WAManager:
     def _log(self, msg):
         self.eventos.append("%s %s" % (time.strftime("%H:%M:%S"), msg))
         del self.eventos[:-30]
+
+    def atividade_msg(self, texto):
+        """Registro do que o observador viu (enviou/recebeu/ignorou), so com o final do numero. Ajuda a achar por que algo nao foi detectado."""
+        with self.lock:
+            self.atividade.append("%s %s" % (time.strftime("%H:%M:%S"), texto))
+            del self.atividade[:-40]
+        logging.getLogger("crm").info("whatsapp: %s", texto)
 
     def _ultimas_linhas_log(self, n=3):
         try:
@@ -215,4 +224,4 @@ class WAManager:
         with self.lock:
             return {"estado": self.estado, "qr": self.qr, "motivo": self.motivo, "qr_idade_s": int(_agora() - self.qr_em) if self.qr_em else None,
                     "tentativas": self.tentativas, "pid": self.proc.pid if self.proc and self.proc.poll() is None else None,
-                    "vinculado": self.ja_vinculado(), "eventos": self.eventos[-8:]}
+                    "vinculado": self.ja_vinculado(), "eventos": self.eventos[-8:], "atividade": self.atividade[-12:]}

@@ -61,6 +61,33 @@ def rejeitar(ids, motivo=""):
         conn.close()
 
 
+_NEG = {"Respondeu": "respondido", "Negociando": "em_negociacao", "Fechado": "fechado", "Perdido": "perdido"}
+
+
+def mover(lead_id, etapa):
+    """Arrastar card de e-mail da Nexora. So etapas pos-envio (Respondeu, Negociando, Fechado, Perdido); Pronto e Contatado dependem do envio real.
+    Descadastro, recusa e bounce mantem o lead em Perdido. Fechado e definitivo."""
+    if etapa not in _NEG:
+        return {"ok": False, "erro": "Pronto e Contatado dependem do e-mail real: aprove e envie na tela Hoje."}
+    conn = ndb.connect()
+    try:
+        r = conn.execute("SELECT status, status_negociacao, resposta_classificacao FROM leads WHERE id=?", (int(lead_id),)).fetchone()
+        if not r:
+            return {"ok": False, "erro": "Lead nao encontrado."}
+        if r["status_negociacao"] == "fechado":
+            return {"ok": False, "erro": "Lead fechado nao volta para o funil."}
+        travado = r["status"] == "rejeitado" or r["resposta_classificacao"] in ("negative", "unsubscribe", "bounce") or r["status_negociacao"] == "perdido"
+        if travado and etapa != "Perdido":
+            return {"ok": False, "erro": "Este contato recusou, foi devolvido ou esta bloqueado. Ele fica em Perdido."}
+        if r["status"] in ("pronto", "aprovado"):
+            return {"ok": False, "erro": "O e-mail ainda nao foi enviado. Envie antes de mover para %s." % etapa}
+        ndb.set_negotiation_status(conn, int(lead_id), _NEG[etapa])
+        conn.commit()
+        return {"ok": True, "para": etapa}
+    finally:
+        conn.close()
+
+
 def suprimir(lead_id, motivo="Solicitacao de remocao (opt-out)."):
     conn = ndb.connect()
     try:

@@ -86,6 +86,7 @@ def passo_gmail():
         _ultimo_sync[conta] = time.time()
         try:
             r = mail.sync(conta)
+            mail.sync_enviados(conta)
             registrar("gmail_" + conta, True)
             if r.get("novas"):
                 log.info("gmail %s: %d respostas novas", conta, r["novas"])

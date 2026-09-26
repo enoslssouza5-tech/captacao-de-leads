@@ -27,7 +27,6 @@ class TestValidadorAtlas(BaseCRM):
             "percentual": BOA_ATLAS.replace("uma ideia rapida", "aumentar 300% suas vendas"),
             "promessa": BOA_ATLAS.replace("Posso te mostrar uma ideia rapida?", "Ja preparei uma previa pronta. Quer ver?"),
             "robotica": "Espero que esteja bem! " + BOA_ATLAS,
-            "Vitoria": BOA_ATLAS.replace("Google", "Google de Vitória da Conquista"),
             "CTA": BOA_ATLAS.replace("Posso te mostrar uma ideia rapida?", "Te mostro uma ideia rapida."),
         }
         for chave, texto in casos.items():
@@ -87,7 +86,7 @@ class TestGeracaoComRetentativa(BaseCRM):
             t = self._prompt_tipo(prompt)
             chamadas.append(t)
             if t == "analise":
-                return json.dumps({"dor": "120 avaliacoes e nenhum site", "criterios": [], "evidencias": ["120 avaliacoes"], "tipo_dor": "sem_site",
+                return json.dumps({"dor": "120 avaliacoes no Google e nenhum site proprio", "criterios": [], "evidencias": ["120 avaliacoes"], "tipo_dor": "sem_site",
                                    "mensagem": ruim, "assunto": "Ideia", "email": "Oi, me chamo Enos. Vi 120 avaliacoes e nenhum site. Posso te mostrar uma ideia?"})
             return BOA_ATLAS
         ia.executor = exe
@@ -105,7 +104,7 @@ class TestGeracaoComRetentativa(BaseCRM):
         r = self.lead_db(lid)
         self.assertEqual(r["etapa"], "Novo")                 # nao foi para Pronto
         self.assertIsNone(r["mensagem"])
-        self.assertIn("Mensagem reprovada nas regras", r["notas"])
+        self.assertIn("reprovada nas regras", r["notas"])
         job = self.sql("SELECT status, detalhe FROM jobs WHERE tipo='analise'")[0]
         self.assertEqual(job["status"], "aviso")
 

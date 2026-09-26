@@ -15,6 +15,8 @@ from urllib import request as urlreq
 TMP = tempfile.mkdtemp(prefix="crm-test-")
 os.environ["CRM_DB"] = os.path.join(TMP, "crm.sqlite3")
 os.environ["CRM_NEXORA_DB"] = os.path.join(TMP, "nexora.sqlite3")
+os.environ["CRM_TRADUCOES"] = os.path.join(TMP, "traducoes.sqlite3")
+os.environ["CRM_VERIFICAR_DNS"] = "0"
 CRM_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, CRM_DIR)
 
@@ -54,14 +56,17 @@ def ia_falsa(prompt, tools=None):
             if any(k in texto for k in chaves):
                 return json.dumps({"categoria": cat, "reuniao": reuniao, "traducao_pt": "[pt] " + texto[:60], "resumo": "resumo " + cat})
         return json.dumps({"categoria": "neutral", "reuniao": False, "traducao_pt": texto[:60], "resumo": "vago"})
+    if prompt.startswith("Translate the text below"):
+        direcao = "PT" if "to Brazilian Portuguese" in prompt[:160] else "EN"
+        return "[%s] %s" % (direcao, prompt.split("TEXT:", 1)[1].strip())
     if "Escreva o follow-up" in prompt:
         return "Oi, so passando para saber se viu minha mensagem. Posso te mostrar uma ideia rapida?"
     if "Reescreva a mensagem abaixo" in prompt:
-        return "Oi, me chamo Enos. Vi que voces tem 120 avaliacoes no Google, mas nao tem um site para transformar isso em orcamento. Posso te mostrar uma ideia?"
+        return "Oi, me chamo Enos. Vi que voces tem 120 avaliacoes no Google, mas nao tem site proprio para receber orcamentos. Posso te mostrar uma ideia?"
     if "ANALISE PROFUNDA" in prompt:
-        return json.dumps({"dor": "Tem 120 avaliacoes e nao tem site.", "criterios": [{"criterio": "Reputacao", "achado": "120 avaliacoes", "impacto": "alto"}],
+        return json.dumps({"dor": "Tem 120 avaliacoes no Google e nao tem site proprio para receber orcamentos.", "criterios": [{"criterio": "Reputacao", "achado": "120 avaliacoes", "impacto": "alto"}],
                            "evidencias": ["120 avaliacoes no Google"], "tipo_dor": "sem_site",
-                           "mensagem": "Oi, me chamo Enos. Vi que voces tem 120 avaliacoes no Google, mas nao tem um site para transformar isso em orcamento. Posso te mostrar uma ideia?",
+                           "mensagem": "Oi, me chamo Enos. Vi que voces tem 120 avaliacoes no Google, mas nao tem site proprio para receber orcamentos. Posso te mostrar uma ideia?",
                            "assunto": "Uma ideia para o site", "email": "Oi, me chamo Enos. Vi 120 avaliacoes e nenhum site. Posso te mostrar uma ideia?"})
     if "Apify" in prompt:
         return json.dumps([{"nome": "Locadora Teste Um", "telefone": "+55 77 99111-2222", "email": None, "site": None, "cidade": "Cidade Teste", "avaliacoes": 90, "nota_google": 4.8}])

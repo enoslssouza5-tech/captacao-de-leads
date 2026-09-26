@@ -32,6 +32,7 @@ function blocoWhatsapp(w) {
     if (ativo) b.append(botaoAcao("Parar", async () => { await post("/api/wa/stop"); renderizar(); }, "btn ghost sm"));
   }
   d.append(b);
+  if (w.atividade && w.atividade.length) d.append(el("details", { open: "", style: "margin-top:16px;color:var(--tx3);font-size:12.5px" }, el("summary", { style: "cursor:pointer" }, "O que o observador viu (sem o texto das mensagens)"), w.atividade.slice().reverse().map((e) => el("div", {}, e))));
   if (w.eventos && w.eventos.length) d.append(el("details", { style: "margin-top:16px;color:var(--tx3);font-size:12.5px" }, el("summary", { style: "cursor:pointer" }, "Registro do observador"), w.eventos.map((e) => el("div", {}, e))));
   return { d, ativo };
 }

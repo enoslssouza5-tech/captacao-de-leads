@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
 import mail  # noqa: F401  (ajusta o sys.path para os modulos do Nexora)
+import acesso
 import gmail_ui
 import backup
 import ia
@@ -38,8 +39,12 @@ def wa_evento(d):
     """Evento vindo do observador: envio detectado ou resposta recebida. So guarda conversa de numeros que sao leads."""
     c = crm()
     try:
-        lead = store.achar_lead_por_telefone(c, d.get("telefone"))
+        tel = d.get("telefone") or ""
+        fim = "final ..." + tel[-4:]
+        sentido = "enviou para" if d.get("direcao") == "saida" else "recebeu de"
+        lead = store.achar_lead_por_telefone(c, tel)
         if not lead:
+            WAM.atividade_msg("voce %s %s: esse numero nao e um lead do CRM, ignorado" % (sentido, fim))
             return {"ignorado": True}
         c.execute("INSERT INTO wa_mensagens (lead_ref, direcao, texto, tipo, ts_msg, created_at) VALUES (?,?,?,?,?,?)",
                   (lead["ref"], d.get("direcao"), (d.get("texto") or "")[:4000], d.get("tipo"), d.get("ts"), now()))
@@ -53,9 +58,12 @@ def wa_evento(d):
                 else:
                     store.registrar_envio(c, lead, 99, "whatsapp_manual")      # resposta/conversa do usuario: zera "aguardando voce"
             c.commit()
+            novo = store.get_lead(c, lead["ref"])
+            WAM.atividade_msg("envio detectado para %s (%s): %s, etapa agora %s" % (fim, lead["nome"], "primeiro contato" if lead["etapa"] in ("Novo", "Pronto") else "conversa/follow-up", novo["etapa"]))
             return {"ok": True, "acao": "envio_detectado"}
         store.registrar_resposta(c, lead, d.get("texto") or "", None, origem="whatsapp")
         c.commit()
+        WAM.atividade_msg("resposta recebida de %s (%s)" % (fim, lead["nome"]))
         spawn(mail.reclassificar)
         return {"ok": True, "acao": "resposta_registrada"}
     finally:
@@ -76,22 +84,74 @@ class H(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _externo(self):
+        """Pedido vindo do tunel: Host nao local ou cabecalhos do proxy. O acesso direto em 127.0.0.1 nao passa por aqui."""
+        host = (self.headers.get("Host") or "").lower()
+        return not host.startswith(("127.0.0.1:", "localhost:")) or any(
+            self.headers.get(h) for h in ("Cf-Connecting-Ip", "X-Forwarded-For", "Cf-Ray", "Forwarded"))
+
+    def _ip(self):
+        return self.headers.get("Cf-Connecting-Ip") or self.client_address[0]
+
+    def _cookie(self):
+        for parte in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = parte.strip().partition("=")
+            if k == "crm_sessao":
+                return v
+        return ""
+
     def _seguro(self, escrita):
-        """Bloqueia CSRF e DNS rebinding: so aceita Host local, Origin local (quando existir) e JSON nas escritas."""
+        """Bloqueia CSRF e DNS rebinding. Local: Host 127.0.0.1/localhost. Externo (tunel): so *.trycloudflare.com, com login."""
         host = (self.headers.get("Host") or "").lower()
         porta = self.server.server_address[1]
         aceitos = {"127.0.0.1:%d" % porta, "localhost:%d" % porta}
-        if host not in aceitos:
+        externo = self._externo()
+        if externo:
+            nome = host.split(":")[0]
+            if not nome.endswith(".trycloudflare.com"):
+                self.send(403, {"erro": "host nao permitido"})
+                return False
+            aceitos = {host}
+        elif host not in aceitos:
             self.send(403, {"erro": "host nao permitido"})
             return False
         origem = self.headers.get("Origin")
-        if origem and origem.lower() not in {"http://" + a for a in aceitos}:
+        if origem and origem.lower() not in {"http://" + a for a in aceitos} | ({"https://" + host} if externo else set()):
             self.send(403, {"erro": "origem nao permitida"})
             return False
         if escrita and not (self.headers.get("Content-Type") or "").lower().startswith("application/json"):
             self.send(415, {"erro": "use application/json"})
             return False
         return True
+
+    def _autorizado(self, caminho):
+        """Local: sempre. Externo: precisa de sessao valida (a pagina de login e o proprio /api/login sao a excecao)."""
+        if not self._externo():
+            return True
+        if not acesso.configurado():
+            self.send(503, {"erro": "acesso externo sem credencial configurada"})
+            return False
+        if acesso.token_valido(self._cookie()):
+            return True
+        if caminho in ("/", "/index.html"):
+            self.send(200, acesso.PAGINA_LOGIN.encode("utf-8"), "text/html; charset=utf-8")
+        else:
+            self.send(401, {"erro": "login necessario"})
+        return False
+
+    def _login(self, d):
+        ip = self._ip()
+        if acesso.bloqueado(ip):
+            return self.send(429, {"erro": "muitas tentativas"})
+        if not acesso.verificar(ip, d.get("usuario"), d.get("senha")):
+            return self.send(401, {"erro": "login ou senha incorretos"})
+        data = json.dumps({"ok": True}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Set-Cookie", "crm_sessao=%s; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=%d" % (acesso.novo_token(), acesso.VALIDADE))
+        self.end_headers()
+        self.wfile.write(data)
 
     def body(self):
         n = int(self.headers.get("Content-Length") or 0)
@@ -104,6 +164,8 @@ class H(BaseHTTPRequestHandler):
         if not self._seguro(False):
             return
         u = urlparse(self.path)
+        if not self._autorizado(u.path):
+            return
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         alvo = STATIC.get(u.path)
         if alvo is None and re.fullmatch(r"/(js/[a-z0-9\-]+\.js|css/[a-z0-9\-]+\.css)", u.path):
@@ -182,9 +244,22 @@ class H(BaseHTTPRequestHandler):
             return
         u = urlparse(self.path)
         d = self.body()
+        if u.path == "/api/login":
+            return self._login(d) if self._externo() else self.send(200, {"ok": True})
+        if u.path == "/api/logout":
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.send_header("Set-Cookie", "crm_sessao=; Path=/; Max-Age=0")
+            self.end_headers()
+            return
+        if not self._autorizado(u.path):
+            return
         p = u.path.strip("/").split("/")
         if u.path == "/api/wa/event":
             return self.send(200, wa_evento(d))
+        if u.path == "/api/wa/diag":
+            WAM.atividade_msg("%s (%s%s)" % (str(d.get("motivo") or "")[:160], d.get("tipo") or "?", ", enviada por voce" if d.get("de_mim") else ""))
+            return self.send(200, {"ok": True})
         if u.path == "/api/wa/status":
             WAM.receber_status(d)
             return self.send(200, {"ok": True})
@@ -199,6 +274,18 @@ class H(BaseHTTPRequestHandler):
         if u.path == "/api/wa/novo-qr":
             WAM.novo_qr()
             return self.send(200, {"ok": True})
+        if u.path == "/api/mover":
+            ref, etapa = str(d.get("ref") or ""), d.get("etapa")
+            if ref.startswith("n") and ref[1:].isdigit():
+                r = nexora_ops.mover(int(ref[1:]), etapa)
+            else:
+                c = crm()
+                try:
+                    r = store.mover_manual(c, ref, etapa)
+                    c.commit()
+                finally:
+                    c.close()
+            return self.send(200 if r.get("ok") else 409, r)
         if u.path.startswith("/api/nexora/"):
             try:
                 if u.path == "/api/nexora/aprovar":
@@ -213,7 +300,16 @@ class H(BaseHTTPRequestHandler):
             except nexora_ops.Bloqueado as e:
                 return self.send(e.codigo, {"erro": str(e)})
             return self.send(404, {"erro": "nao encontrado"})
+        if u.path == "/api/traduzir":
+            try:
+                return self.send(200, ia.translate_text(d.get("texto", ""), d.get("de", "en"), d.get("para", "pt")))
+            except ValueError as e:
+                return self.send(400, {"erro": str(e)})
+            except RuntimeError as e:
+                return self.send(503, {"erro": str(e)})
         if u.path == "/api/gmail/send" and d.get("conta") in CONTAS:
+            if d["conta"] == "nexora" and regras.parece_portugues(d.get("corpo", "")):
+                return self.send(400, {"erro": "A Nexora envia em ingles. Use 'Preparar em ingles' e envie a versao em ingles."})
             try:
                 gmail_ui.enviar(d["conta"], d.get("para", ""), d.get("assunto", ""), d.get("corpo", ""), d.get("thread_id"), d.get("in_reply_to"), d.get("references"))
                 return self.send(200, {"ok": True})
@@ -305,7 +401,9 @@ class H(BaseHTTPRequestHandler):
                         spawn(mail.reclassificar)
                     return self.send(200, {"ok": True, "classificacao": cls})
                 elif acao == "editar":
-                    campos = {k: d[k] for k in ("etapa", "nome", "contato", "telefone", "email", "cidade", "site", "fonte", "mensagem", "assunto", "notas", "dor") if k in d}
+                    campos = {k: d[k] for k in ("etapa", "nome", "contato", "telefone", "email", "cidade", "site", "fonte", "mensagem", "assunto", "notas", "dor", "criterios_json") if k in d}
+                    if isinstance(campos.get("criterios_json"), (dict, list)):
+                        campos["criterios_json"] = json.dumps(campos["criterios_json"], ensure_ascii=False)
                     if campos.get("etapa") and campos["etapa"] not in ETAPAS:
                         return self.send(400, {"erro": "etapa invalida"})
                     if campos:

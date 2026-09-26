@@ -55,7 +55,7 @@ function linhaAcao(cat, it, ctx) {
   const corpo = el("div", {}, t1);
   if (cat === "responder") {
     t1.append(clsPill(it.classificacao), pill("", it.etapa), el("span", { class: "faint", style: "font-weight:450;font-size:12.5px" }, "há " + quando(it.desde)));
-    corpo.append(el("div", { class: "t2" }, it.resumo ? it.resumo + " — " : "", it.texto));
+    corpo.append(el("div", { class: "t2" }, it.resumo ? it.resumo + " — " : "", it.texto), S.conta === "nexora" && it.texto ? botaoTraduzir(it.texto, "en", "pt") : "");
     lado.append(botaoAcao("Responder", () => abrirConversa(it), "btn sm", "arrow"));
   } else if (cat === "whatsapp") {
     if (it.score != null) t1.append(pill(it.score >= 70 ? "ok" : "", "oportunidade " + it.score));
